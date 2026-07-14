@@ -63,6 +63,11 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from classify import classify_findings, is_non_iac  # noqa: E402
+from compliance import (  # noqa: E402
+    ControlMap,
+    attach_compliance,
+    build_control_coverage,
+)
 from findings import UNMAPPED, is_quick_win, priority_score  # noqa: E402
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "informational", UNMAPPED)
@@ -248,6 +253,7 @@ def build_report(
     file_patches: Optional[Sequence[Any]] = None,
     root: str = ".",
     compliance: Optional[str] = None,
+    compliance_coverage: Optional[Dict[str, Any]] = None,
     fix_catalog_rule_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """The JSON report. ``render_markdown`` renders exactly this, nothing more."""
@@ -297,10 +303,11 @@ def build_report(
         "suppressionLog": merge_result.get("suppressionLog") or [],
         "injectionAttempts": merge_result.get("injectionAttempts") or [],
         "filePatches": [fp.to_dict() for fp in (file_patches or [])],
-        # Section 5 seam. Phase 2 (WS-10) fills this from a checked-in, human-
-        # reviewed control-map.json. Until then it is None and the section says
-        # so -- it never guesses a control ID (SPEC §14.3).
-        "compliance": None,
+        # Section 5. Filled by WS-10 from a checked-in, human-reviewed
+        # control-map.json when a caller passes ``compliance_coverage``. It is
+        # never model-generated: a hallucinated control ID is risk #3 (SPEC
+        # §14.3), so this stays None unless real, data-backed coverage is given.
+        "compliance": compliance_coverage,
         "complianceRequested": compliance,
     }
     report["verdict"] = verdict_line(report)
@@ -515,7 +522,86 @@ def _render_compliance(report: Dict[str, Any]) -> List[str]:
             "",
         ]
         return lines
-    lines += ["_(rendered from control-map.json)_", ""]  # pragma: no cover - WS-10
+    cov = report["compliance"]
+
+    # The one sentence that ships in EVERY compliance report, non-optional. It is
+    # the mitigation for "clean scan = compliant" (SPEC §7.2 / §14.6). It appears
+    # first, before any satisfied/violated detail, so it cannot be missed.
+    lines += [
+        "> **%s**" % cov["mandatoryCaveat"],
+        ">",
+        "> A clean scan here is NOT a clean %s posture. This tool assesses only what "
+        "Terraform can express. Controls that are procedural or otherwise invisible to "
+        "IaC are listed below, unevaluated." % cov.get("baseline", "800-53"),
+        "",
+        "_Baseline: %s. %d of %d controls in this baseline are assessable from IaC._"
+        % (
+            cov.get("baselineSource", "800-53"),
+            cov.get("assessableControlCount", 0),
+            cov.get("baselineControlCount", 0),
+        ),
+        "",
+    ]
+
+    violated = cov.get("violated") or []
+    satisfied = cov.get("satisfied") or []
+    not_assessable = cov.get("notAssessable") or {}
+    unmapped_rules = cov.get("unmappedRules") or []
+
+    lines += ["### Controls with violations (%d)" % len(violated), ""]
+    if violated:
+        for v in violated:
+            lines.append(
+                "- **%s** (%s family) — %d finding%s: %s"
+                % (
+                    v["control"],
+                    v["family"],
+                    len(v["findingIds"]),
+                    "" if len(v["findingIds"]) == 1 else "s",
+                    ", ".join(v["ruleIds"]),
+                )
+            )
+    else:
+        lines.append("- None mapped from this scan's findings.")
+    lines.append("")
+
+    lines += ["### Controls with passing evidence (%d)" % len(satisfied), ""]
+    if satisfied:
+        lines.append(
+            "> Passing checks are evidence toward these controls, not proof a control "
+            "is fully met — a control can have process facets IaC cannot see."
+        )
+        lines.append("")
+        for s in satisfied:
+            lines.append(
+                "- **%s** (%s family) — %s"
+                % (s["control"], s["family"], ", ".join(s["ruleIds"]))
+            )
+    else:
+        lines.append("- No passing checks mapped to a control in this scan.")
+    lines.append("")
+
+    lines += [
+        "### NOT ASSESSABLE FROM IaC (%d)" % not_assessable.get("count", 0),
+        "",
+        not_assessable.get("note", ""),
+        "",
+    ]
+    controls = not_assessable.get("controls") or []
+    if controls:
+        lines.append("`%s`" % "`, `".join(controls))
+        lines.append("")
+
+    if unmapped_rules:
+        lines += [
+            "### Findings on rules with no control mapping (%d)" % len(unmapped_rules),
+            "",
+            "These findings fired on rules that control-map.json does not map to a "
+            "control. They are reported as `unmapped`, never guessed (SPEC §5.3): "
+            "`%s`" % "`, `".join(unmapped_rules),
+            "",
+        ]
+
     return lines
 
 
@@ -657,6 +743,22 @@ def scan(root: str, *, compliance: Optional[str] = None, use_fmt: bool = True) -
         )
         file_patches = generate_file_patches(root, patches, resources, use_fmt=use_fmt)
 
+    compliance_coverage = None
+    if compliance:
+        # Control coverage is joined from the checked-in, human-reviewed
+        # control-map.json only. No control ID is ever generated at runtime
+        # (SPEC §5.3 / §14.3). A missing map is a loud failure, not a silent
+        # empty section -- but if the data file is absent we still ship the
+        # gap message rather than a fabricated one.
+        control_map = ControlMap.load()
+        attach_compliance(merge_result.get("findings") or [], control_map)
+        compliance_coverage = build_control_coverage(
+            merge_result.get("findings") or [],
+            checkov_result.get("passedChecks") or [],
+            control_map,
+            baseline=compliance,
+        )
+
     return build_report(
         merge_result,
         checkov_result=checkov_result,
@@ -665,16 +767,41 @@ def scan(root: str, *, compliance: Optional[str] = None, use_fmt: bool = True) -
         file_patches=file_patches,
         root=root,
         compliance=compliance,
+        compliance_coverage=compliance_coverage,
     )
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """CLI. Exit codes are SPEC §9.2 and they are the product:
+
+        0 -- clean at or above the --severity floor
+        1 -- findings at or above the floor
+        2 -- scan error (a degraded scan is an error, never a silent success)
+
+    so that ``iac-scan --severity high || exit 1`` is a working CI gate.
+    """
     import argparse
+
+    from emit_sarif import (
+        DEFAULT_FLOOR,
+        EXIT_ERROR,
+        SEVERITY_FLOORS,
+        DegradedScanError,
+        emit_sarif,
+        findings_at_or_above,
+        gate_exit_code,
+    )
 
     parser = argparse.ArgumentParser(description="Render an IaC security scan report")
     parser.add_argument("root", help="directory to scan")
-    parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    parser.add_argument("--format", choices=("markdown", "json", "sarif"), default="markdown")
     parser.add_argument("--out", help="write to this file instead of stdout")
+    parser.add_argument(
+        "--severity",
+        choices=SEVERITY_FLOORS,
+        default=DEFAULT_FLOOR,
+        help="reporting floor and CI gate threshold (default: %s)" % DEFAULT_FLOOR,
+    )
     parser.add_argument(
         "--compliance",
         metavar="BASELINE",
@@ -683,12 +810,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-fmt", action="store_true", help="skip terraform fmt on patches")
     args = parser.parse_args(argv)
 
-    report = scan(args.root, compliance=args.compliance, use_fmt=not args.no_fmt)
-    text = (
-        json.dumps(report, indent=2, default=str)
-        if args.format == "json"
-        else render_markdown(report)
-    )
+    try:
+        report = scan(args.root, compliance=args.compliance, use_fmt=not args.no_fmt)
+    except Exception as exc:  # noqa: BLE001 -- any scan failure is exit 2, never 0
+        sys.stderr.write("scan error: %s\n" % exc)
+        return EXIT_ERROR
+
+    if args.format == "sarif":
+        try:
+            text = json.dumps(emit_sarif(report, root=args.root), indent=2)
+        except DegradedScanError as exc:
+            # No line numbers means nothing honest to emit. Say so; emit nothing.
+            sys.stderr.write("DEGRADED SCAN — no SARIF emitted.\n%s\n" % exc)
+            return EXIT_ERROR
+    elif args.format == "json":
+        text = json.dumps(report, indent=2, default=str)
+    else:
+        text = render_markdown(report)
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
@@ -696,8 +834,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         sys.stdout.write(text if text.endswith("\n") else text + "\n")
 
-    # A degraded scan is never a silent success (§9.2 reserves 2 for scan error).
-    return 2 if report["degradation"]["degraded"] else 0
+    exit_code = gate_exit_code(report, args.severity)
+
+    # The floor decides the gate, so state what it caught -- and, separately, what it
+    # could not rank. An unmapped finding never trips the gate (it has no rank), which
+    # would make it invisible to CI if we did not say this out loud.
+    hits = findings_at_or_above(report["findings"], args.severity)
+    unmapped = sum(1 for f in report["findings"] if (f.get("severity") or UNMAPPED) == UNMAPPED)
+    if hits:
+        sys.stderr.write(
+            "%d finding%s at or above the '%s' floor.\n"
+            % (len(hits), "" if len(hits) == 1 else "s", args.severity)
+        )
+    if unmapped:
+        sys.stderr.write(
+            "%d finding%s ha%s no severity in data/rule-severity.json and therefore no rank; "
+            "%s NOT evaluated against the gate.\n"
+            % (
+                unmapped,
+                "" if unmapped == 1 else "s",
+                "s" if unmapped == 1 else "ve",
+                "it is" if unmapped == 1 else "they are",
+            )
+        )
+
+    return exit_code
 
 
 __all__ = [

@@ -529,7 +529,15 @@ class TestAgainstFixtures:
         report = scan(os.path.join(FIXTURES, fixture), use_fmt=False)
         high = [f for f in report["findings"] if f["severity"] in ("critical", "high")]
         assert high, "the fixture does have high findings"
-        assert all(f["ruleId"].startswith("CKV_AWS_28") or f["ruleId"] in ("CKV_AWS_290", "CKV_AWS_355") for f in high)
+        # Every high finding here needs a judgment call, not a mechanical patch:
+        # the IAM policy rules (no correct ARN set without intent) and the hardcoded
+        # secrets (rotate + move to Secrets Manager + scrub history -- manual, and
+        # never a one-line diff). None is a quick win, which is the point.
+        assert all(
+            f["ruleId"].startswith(("CKV_AWS_28", "CKV_SECRET_"))
+            or f["ruleId"] in ("CKV_AWS_290", "CKV_AWS_355")
+            for f in high
+        ), sorted({f["ruleId"] for f in high})
         assert report["quickWins"] == []
         block = render_markdown(report).split("## Quick wins")[1].split("## Findings by priority")[0]
         assert "needs a judgment call" in block

@@ -171,8 +171,12 @@ class TestSeverityMapData:
                 )
 
     def test_rule_ids_are_well_formed(self, raw_severity_map):
+        # CKV_SECRET_* is Checkov's cross-provider secrets framework (hardcoded
+        # credentials), which we scan by default -- see run_checkov.
         for rule_id in raw_severity_map:
-            assert rule_id.startswith(("CKV_AWS_", "CKV2_AWS_", "IACSEC-")), rule_id
+            assert rule_id.startswith(
+                ("CKV_AWS_", "CKV2_AWS_", "CKV_SECRET_", "IACSEC-")
+            ), rule_id
 
     def test_map_is_not_writable_at_runtime(self, severity_map):
         """There is no API to add a seed. Resolution is read-only, by construction."""

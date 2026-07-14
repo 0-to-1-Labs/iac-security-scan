@@ -580,5 +580,17 @@
     "severity": "low",
     "rationale": "ECS cluster does not have Container Insights enabled. Observability/monitoring control -- no direct security exposure. Prowler: ecs_cluster_container_insights_enabled = medium; seeded one level lower because Container Insights is a metrics feature, not a security or audit control.",
     "source": "curated"
+  },
+  "CKV_SECRET_4": {
+    "severity": "high",
+    "rationale": "Basic Auth credentials hardcoded in source (Checkov `secrets` framework). A committed credential is live the moment it lands in git history, readable by anyone with repo access and unremovable without history rewrite. Seeded high rather than critical because the finding is a pattern match, not proof the credential is valid/production; the LLM layer may raise it to critical when context (an `sk-prod-` prefix, a DB master user) warrants.",
+    "source": "curated",
+    "severityBefore": "unmapped"
+  },
+  "CKV_SECRET_6": {
+    "severity": "high",
+    "rationale": "Base64 high-entropy string hardcoded in source (Checkov `secrets` framework) -- the detector behind the three plaintext production secrets found in tf-02/lambda.tf. High, not critical, because entropy detection carries false positives (a real base64 asset can trip it); the LLM layer adjusts on context. See run_checkov secrets-framework default.",
+    "source": "curated",
+    "severityBefore": "unmapped"
   }
 }

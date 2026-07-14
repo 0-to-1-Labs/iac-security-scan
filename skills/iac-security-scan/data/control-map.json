@@ -1,0 +1,1117 @@
+{
+  "_meta": {
+    "purpose": "Checkov rule ID -> NIST 800-53 Rev 5 control mapping. Feeds the --compliance 800-53 control-coverage report (SPEC 5.3 / 7.2).",
+    "governance": "STATIC, CHECKED-IN, HUMAN-REVIEWED DATA. The model NEVER generates a control ID at runtime. Every nist_800_53 ID is attested by an authority (infrabot cmmc_level2_aws.json, which lists the control for the concept the rule assesses) OR is source='curated' with a written rationale. A rule with no authority-backed control is coverage='unmapped' with NO controls -- never guessed, never defaulted. Silence is safer than a guess. A hallucinated AC-17 in a FedRAMP package is the single worst thing this plugin could do (risk #3).",
+    "overMappingNote": "Both authorities (cmmc requirement bundles; Prowler's native nist_800_53_revision_5_aws.json) attach 20-30 controls to one check -- a public S3 check pulls in AC-17 remote-access enhancements, SC-7 boundary enhancements, etc. That maximal-recall mapping is the FedRAMP hazard. This file is hand-pruned to the DIRECT technical base control(s) each rule assesses; broad process controls (AC-17, AC-2 account-mgmt, IR-*, CM-8 inventory) are dropped even when the bundle lists them. Every such judgment is stated in the rationale for GATE 3 scrutiny.",
+    "sources": {
+      "cmmc-derived": "Control base-ID is attested by infrabot cmmc_level2_aws.json for the requirement bundle containing this rule's matched Prowler check; the specific base control was hand-selected as the direct technical control and coarse process controls were pruned.",
+      "prowler": "Prowler check metadata (concept-matched in rule-severity.json). Not used as a NIST authority here because Prowler's native 800-53 file is maximally over-mapped.",
+      "curated": "Human judgment where no authority cleanly covers the concept. SCRUTINIZE HARDEST. None are emitted in this build -- uncertain concepts are left unmapped instead."
+    },
+    "coverage": [
+      "automated",
+      "partial",
+      "manual",
+      "unmapped"
+    ],
+    "checkovToProwler": "The rule->concept assignment reuses WS-3's human-reviewed Checkov->Prowler concept matches recorded in rule-severity.json.",
+    "gate3": {
+      "reviewed": false,
+      "date": "2026-07-14",
+      "note": "PENDING human sign-off (GATE 3)."
+    }
+  },
+  "CKV_AWS_19": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_145": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_136": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_158": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_173": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_26": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_27": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_119": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_159": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_195": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_58": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_35": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_147": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_219": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_354": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_16": {
+    "nist_800_53": [
+      "SC-28"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data at rest. cmmc bundles this check under SC-28 (protection of information at rest)."
+  },
+  "CKV_AWS_2": {
+    "nist_800_53": [
+      "SC-8",
+      "SC-13"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data in transit. cmmc maps transit-encryption checks to SC-8 (transmission confidentiality) + SC-13 (cryptographic protection)."
+  },
+  "CKV2_AWS_20": {
+    "nist_800_53": [
+      "SC-8",
+      "SC-13"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data in transit. cmmc maps transit-encryption checks to SC-8 (transmission confidentiality) + SC-13 (cryptographic protection)."
+  },
+  "CKV_AWS_103": {
+    "nist_800_53": [
+      "SC-8",
+      "SC-13"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data in transit. cmmc maps transit-encryption checks to SC-8 (transmission confidentiality) + SC-13 (cryptographic protection)."
+  },
+  "CKV_AWS_378": {
+    "nist_800_53": [
+      "SC-8",
+      "SC-13"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data in transit. cmmc maps transit-encryption checks to SC-8 (transmission confidentiality) + SC-13 (cryptographic protection)."
+  },
+  "CKV2_AWS_69": {
+    "nist_800_53": [
+      "SC-8",
+      "SC-13"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data in transit. cmmc maps transit-encryption checks to SC-8 (transmission confidentiality) + SC-13 (cryptographic protection)."
+  },
+  "CKV_AWS_379": {
+    "nist_800_53": [
+      "SC-8",
+      "SC-13"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data in transit. cmmc maps transit-encryption checks to SC-8 (transmission confidentiality) + SC-13 (cryptographic protection)."
+  },
+  "CKV2_AWS_51": {
+    "nist_800_53": [
+      "SC-8",
+      "SC-13"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Encryption of data in transit. cmmc maps transit-encryption checks to SC-8 (transmission confidentiality) + SC-13 (cryptographic protection)."
+  },
+  "CKV_AWS_20": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_57": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_70": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_375": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_53": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_54": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_55": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_56": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_17": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_302": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_301": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_32": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_168": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_169": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_33": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_87": {
+    "nist_800_53": [
+      "AC-3",
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Public exposure of a resource/policy. cmmc lists AC-3 (access enforcement) + SC-7 (boundary protection). AC-17 remote-access enhancements in the same bundle are deliberately dropped: a public-access check does not assess remote-access policy."
+  },
+  "CKV_AWS_130": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_88": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_38": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_39": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_333": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_117": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_24": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_25": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_277": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_260": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV_AWS_382": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV2_AWS_12": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV2_AWS_28": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV2_AWS_77": {
+    "nist_800_53": [
+      "SC-7"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Network-level public exposure (public IP / open ingress). cmmc bundles under SC-7 (boundary protection). AC-17 in the same bundle is dropped as a process control."
+  },
+  "CKV2_AWS_31": {
+    "nist_800_53": [
+      "AU-2",
+      "AU-12"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Audit logging enablement. cmmc maps logging checks to AU-2 (event logging) + AU-12 (audit record generation)."
+  },
+  "CKV_AWS_18": {
+    "nist_800_53": [
+      "AU-2",
+      "AU-12"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Audit logging enablement. cmmc maps logging checks to AU-2 (event logging) + AU-12 (audit record generation)."
+  },
+  "CKV_AWS_67": {
+    "nist_800_53": [
+      "AU-2",
+      "AU-12"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Audit logging enablement. cmmc maps logging checks to AU-2 (event logging) + AU-12 (audit record generation)."
+  },
+  "CKV_AWS_91": {
+    "nist_800_53": [
+      "AU-2",
+      "AU-12"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Audit logging enablement. cmmc maps logging checks to AU-2 (event logging) + AU-12 (audit record generation)."
+  },
+  "CKV_AWS_76": {
+    "nist_800_53": [
+      "AU-2",
+      "AU-12"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Audit logging enablement. cmmc maps logging checks to AU-2 (event logging) + AU-12 (audit record generation)."
+  },
+  "CKV2_AWS_11": {
+    "nist_800_53": [
+      "AU-2",
+      "AU-12"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Audit logging enablement. cmmc maps logging checks to AU-2 (event logging) + AU-12 (audit record generation)."
+  },
+  "CKV_AWS_338": {
+    "nist_800_53": [
+      "AU-11"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Audit record retention. cmmc lists AU-11 for retention-period checks."
+  },
+  "CKV_AWS_36": {
+    "nist_800_53": [
+      "AU-9"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Protection/integrity of audit records. cmmc lists AU-9 for log-validation/immutability checks."
+  },
+  "CKV_AWS_49": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_62": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_63": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_274": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_60": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_61": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_286": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_289": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_290": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_355": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_287": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_288": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_107": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_108": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_109": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_110": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_111": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_316": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_334": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_335": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_336": {
+    "nist_800_53": [
+      "AC-6"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Least privilege. cmmc maps over-permissive / privilege-escalation / admin IAM checks to AC-6."
+  },
+  "CKV_AWS_7": {
+    "nist_800_53": [
+      "SC-12"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Cryptographic key management (rotation). cmmc maps key-rotation checks to SC-12."
+  },
+  "CKV_AWS_161": {
+    "nist_800_53": [
+      "IA-2"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Identification & authentication (MFA / IAM DB auth). cmmc maps to IA-2."
+  },
+  "CKV_AWS_41": {
+    "nist_800_53": [
+      "IA-5"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Authenticator management (hardcoded secrets / secret rotation). cmmc maps these to IA-5."
+  },
+  "CKV_AWS_45": {
+    "nist_800_53": [
+      "IA-5"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Authenticator management (hardcoded secrets / secret rotation). cmmc maps these to IA-5."
+  },
+  "CKV_AWS_46": {
+    "nist_800_53": [
+      "IA-5"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Authenticator management (hardcoded secrets / secret rotation). cmmc maps these to IA-5."
+  },
+  "CKV_AWS_149": {
+    "nist_800_53": [
+      "IA-5"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Authenticator management (hardcoded secrets / secret rotation). cmmc maps these to IA-5."
+  },
+  "CKV_AWS_21": {
+    "nist_800_53": [
+      "CP-9"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Backup / point-in-time recovery / replication. cmmc lists CP-9 for versioning/PITR/replication checks."
+  },
+  "CKV_AWS_144": {
+    "nist_800_53": [
+      "CP-9"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Backup / point-in-time recovery / replication. cmmc lists CP-9 for versioning/PITR/replication checks."
+  },
+  "CKV_AWS_28": {
+    "nist_800_53": [
+      "CP-9"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Backup / point-in-time recovery / replication. cmmc lists CP-9 for versioning/PITR/replication checks."
+  },
+  "CKV_AWS_163": {
+    "nist_800_53": [
+      "RA-5"
+    ],
+    "cis_aws": [],
+    "fedrampBaseline": "moderate",
+    "coverage": "automated",
+    "source": "cmmc-derived",
+    "rationale": "Vulnerability scanning. cmmc maps image-scan checks to RA-5."
+  },
+  "CKV_AWS_116": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "Lambda dead-letter queue -- reliability/observability, no security control (no cmmc authority)."
+  },
+  "CKV_AWS_115": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "Lambda reserved concurrency -- availability/blast-radius, no clean 800-53 control in the authority."
+  },
+  "CKV_AWS_272": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "Lambda code signing -- maps conceptually to SI-7 (software integrity), which is NOT in the cmmc source. Silence over a guess."
+  },
+  "CKV2_AWS_53": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "API Gateway request validation -- maps conceptually to SI-10 (input validation), NOT in the cmmc source."
+  },
+  "CKV_AWS_300": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "S3 lifecycle policy -- retention/cost, no security control."
+  },
+  "CKV2_AWS_62": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "S3 event notifications -- observability plumbing, no direct control."
+  },
+  "CKV_AWS_150": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "ELBv2 deletion protection -- change-safety, no clean authority-backed control."
+  },
+  "CKV_AWS_293": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "RDS deletion protection -- change-safety, no clean authority-backed control."
+  },
+  "CKV_AWS_131": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "ELBv2 desync mitigation -- request-smuggling hardening, no authority-backed control."
+  },
+  "CKV_AWS_51": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "ECR tag immutability -- supply-chain integrity (SI-7-adjacent), NOT in the cmmc source."
+  },
+  "CKV_AWS_79": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "EC2 IMDSv2 -- credential-theft hardening; no unambiguous authority-backed control (AC-6/SC-23 both a stretch). Left unmapped rather than guessed."
+  },
+  "CKV_AWS_65": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "ECS Container Insights -- observability, no security control."
+  },
+  "CKV_AWS_237": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "create_before_destroy -- deployment reliability, no security control."
+  },
+  "CKV_AWS_120": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "API Gateway caching -- performance, no security control."
+  },
+  "CKV_AWS_225": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "API Gateway method caching -- performance, no security control."
+  },
+  "CKV_AWS_23": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "Security group description -- documentation hygiene, no security control."
+  },
+  "CKV_AWS_276": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "No secrets in CloudWatch logs -- sensitive-data-in-logs; no unambiguous authority-backed control. Left unmapped."
+  },
+  "CKV2_AWS_71": {
+    "nist_800_53": [],
+    "cis_aws": [],
+    "fedrampBaseline": null,
+    "coverage": "unmapped",
+    "source": "curated",
+    "rationale": "ACM wildcard certificate -- deliberate/common practice; no authority-backed control."
+  }
+}
