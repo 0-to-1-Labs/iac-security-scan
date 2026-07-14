@@ -1,0 +1,235 @@
+{
+  "_meta": {
+    "source": "tests/fixtures/SECURITY_FLAWS.md — infrabot's planted-flaw catalogue, the CloudFormation answer key",
+    "scope": "The 25 CloudFormation flaws (CFN-01..CFN-05). Terraform lives in answer-key.json; CDK is out of scope.",
+    "checkovPinned": "3.2.500",
+    "framework": "cloudformation + secrets (see run_checkov.frameworks_for_format)",
+    "governance": [
+      "This file is checked-in, human-reviewable DATA. It is the grading key for CFN detection recall.",
+      "A flaw is 'detected' only if a finding fires with one of `detectedBy` IN THE STATED FILE (all CFN flaws live in template.yaml).",
+      "`detectedBy: []` means NO Checkov rule catches this flaw. Those are recorded with a missReason and requiresLlmLayer, never hidden.",
+      "Never relax an entry to make recall look better. Recall is a number we report, not a number we manage."
+    ],
+    "deterministicRecall": "14/25 (56%). The 11 misses are listed below, each with the reason it escapes.",
+    "whyTheMissesMatter": [
+      "On 4 of the 11 misses Checkov did not merely lack a rule -- it EVALUATED the flawed resource and placed the check in passed_checks.",
+      "It looked straight at the planted flaw and called it fine. Those four (CFN-02-3, CFN-03-3, CFN-05-5, and the SageMaker cases) are the",
+      "confidently-wrong shape that is the whole argument for the hybrid design: the deterministic layer is not just incomplete, it is wrong.",
+      "The other 7 are structural gaps (IoT policies, EBS-inline encryption, SQS/EventBridge DLQ, Firehose SSE, plaintext parameter credentials)",
+      "with no Checkov CloudFormation rule at all. All 11 are what the iac-security-analyst LLM layer must earn its keep on."
+    ]
+  },
+
+  "cfn-01-wordpress-ec2-rds": [
+    {
+      "id": "CFN-01-1",
+      "flaw": "RDS instance publicly accessible",
+      "severity": "CRITICAL",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_17"]
+    },
+    {
+      "id": "CFN-01-2",
+      "flaw": "EC2 security group with SSH (port 22) open to 0.0.0.0/0",
+      "severity": "CRITICAL",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_24"]
+    },
+    {
+      "id": "CFN-01-3",
+      "flaw": "Database credentials passed as plaintext CloudFormation parameters",
+      "severity": "CRITICAL",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "Credentials arrive through CloudFormation Parameters, not as string literals in the template body, so Checkov's `secrets` framework finds nothing (0 secret findings on this fixture). There is no CloudFormation rule that flags a credential-shaped parameter lacking NoEcho. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-01-4",
+      "flaw": "EBS volumes without encryption",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "The EBS volume is defined inline in the LaunchTemplate's BlockDeviceMappings; Checkov's EBS-encryption rules target a standalone AWS::EC2::Volume and never evaluated the inline mapping (the LaunchTemplate fired only CKV_AWS_79/CKV_AWS_88). Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-01-5",
+      "flaw": "ALB HTTP listener without HTTPS redirect",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_2"]
+    }
+  ],
+
+  "cfn-02-ml-platform": [
+    {
+      "id": "CFN-02-1",
+      "flaw": "SageMaker notebook with direct internet access",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "No active Checkov CloudFormation rule asserts SageMaker NotebookInstance DirectInternetAccess=Disabled. The only rule that fires on the notebooks is CKV_AWS_371 (IMDSv2), an unrelated control; CKV2_AWS_68 (IAM policy) and CKV_AWS_187 (KMS) evaluated and PASSED. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-02-2",
+      "flaw": "S3 model artifacts bucket without versioning",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_21"]
+    },
+    {
+      "id": "CFN-02-3",
+      "flaw": "SageMaker execution role with overly permissive S3 access",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "EVALUATED-AND-PASSED. Every IAM-wildcard rule (CKV_AWS_107/108/109/110/111 and CKV_AWS_60/61/62/63) ran against SageMakerExecutionRole and landed in passed_checks. The role scopes actions with a service-level wildcard (e.g. s3:*), which Checkov's rules -- keyed on a bare '*' or admin -- sail past. The deterministic layer looked straight at it and called it fine. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-02-4",
+      "flaw": "SageMaker notebook instance with root access enabled",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "No Checkov CloudFormation rule asserts SageMaker NotebookInstance RootAccess=Disabled; the notebooks fire only CKV_AWS_371 (IMDSv2). Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-02-5",
+      "flaw": "KMS key without automatic rotation",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_7"]
+    }
+  ],
+
+  "cfn-03-iot-ingestion": [
+    {
+      "id": "CFN-03-1",
+      "flaw": "IoT policy with overly permissive actions (iot:*)",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "Checkov has no CloudFormation rule for AWS::IoT::Policy wildcard actions -- IoT-specific permission analysis is outside its rule set entirely. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-03-2",
+      "flaw": "Kinesis stream without server-side encryption",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_43"]
+    },
+    {
+      "id": "CFN-03-3",
+      "flaw": "S3 bucket without default encryption",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "EVALUATED-AND-PASSED. CKV_AWS_19 (S3 server-side encryption) ran against DataLakeBucket and landed in passed_checks -- Checkov judged the bucket encrypted. The only failing check on it is CKV_AWS_18 (access logging), a different concern. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-03-4",
+      "flaw": "Lambda function with overly permissive IAM role",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_111", "CKV_AWS_108", "CKV_AWS_109"]
+    },
+    {
+      "id": "CFN-03-5",
+      "flaw": "Firehose delivery stream without S3 encryption",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "No Checkov CloudFormation rule fires for Kinesis Firehose delivery-stream S3 encryption; the delivery stream is evaluated for nothing encryption-related. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    }
+  ],
+
+  "cfn-04-event-driven": [
+    {
+      "id": "CFN-04-1",
+      "flaw": "SQS queue without server-side encryption",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_27"]
+    },
+    {
+      "id": "CFN-04-2",
+      "flaw": "SQS queue without a dead-letter queue",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "Checkov has no rule asserting an SQS redrive/dead-letter policy -- reliability posture, not a security predicate it evaluates. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "CFN-04-3",
+      "flaw": "Lambda without reserved concurrency (DoS risk)",
+      "severity": "LOW",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_115"]
+    },
+    {
+      "id": "CFN-04-4",
+      "flaw": "SNS topic without server-side encryption",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_26"]
+    },
+    {
+      "id": "CFN-04-5",
+      "flaw": "EventBridge rule without DLQ for failed invocations",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "Checkov has no rule for an EventBridge rule/target dead-letter configuration. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    }
+  ],
+
+  "cfn-05-static-website": [
+    {
+      "id": "CFN-05-1",
+      "flaw": "CloudFront with minimum TLS version TLSv1 (not TLSv1.2)",
+      "severity": "HIGH",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_174"]
+    },
+    {
+      "id": "CFN-05-2",
+      "flaw": "S3 bucket without access logging",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_18"]
+    },
+    {
+      "id": "CFN-05-3",
+      "flaw": "CloudFront distribution without access logging",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_86"]
+    },
+    {
+      "id": "CFN-05-4",
+      "flaw": "WAF WebACL missing comprehensive OWASP rules",
+      "severity": "MEDIUM",
+      "file": "template.yaml",
+      "detectedBy": ["CKV_AWS_192"],
+      "note": "Partial/proxy match. CKV_AWS_192 (WAF prevents Log4Shell lookup) fires on the WebACL precisely because it lacks comprehensive managed rule groups; its remediation is 'add managed rule groups', which is this flaw. It is not an OWASP-coverage rule per se, so it is counted as detected but flagged here for auditability."
+    },
+    {
+      "id": "CFN-05-5",
+      "flaw": "S3 bucket with public read access (no OAI restriction)",
+      "severity": "CRITICAL",
+      "file": "template.yaml",
+      "detectedBy": [],
+      "missReason": "EVALUATED-AND-PASSED. WebsiteBucket passed CKV_AWS_20 (no public READ ACL) and CKV_AWS_53/54/55/56 (public-access-block). The public read is granted through a separate AWS::S3::BucketPolicy with Principal:*, which Checkov's bucket-level public-access rules do not inspect. The deterministic layer looked at the bucket and called it locked down. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    }
+  ]
+}

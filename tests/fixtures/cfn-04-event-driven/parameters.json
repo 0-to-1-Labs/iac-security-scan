@@ -1,0 +1,22 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "OrderTableReadCapacity",
+    "ParameterValue": "5"
+  },
+  {
+    "ParameterKey": "OrderTableWriteCapacity",
+    "ParameterValue": "5"
+  },
+  {
+    "ParameterKey": "NotificationEmail",
+    "ParameterValue": "ops-team@example.com"
+  },
+  {
+    "ParameterKey": "EnableDetailedMonitoring",
+    "ParameterValue": "true"
+  }
+]

@@ -1,0 +1,42 @@
+[
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "Production"
+  },
+  {
+    "ParameterKey": "KeyName",
+    "ParameterValue": "my-ec2-keypair"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.medium"
+  },
+  {
+    "ParameterKey": "DBInstanceClass",
+    "ParameterValue": "db.t3.medium"
+  },
+  {
+    "ParameterKey": "DBName",
+    "ParameterValue": "wordpressdb"
+  },
+  {
+    "ParameterKey": "DBUsername",
+    "ParameterValue": "wpdbadmin"
+  },
+  {
+    "ParameterKey": "DBPassword",
+    "ParameterValue": "MyInsecurePassword123!"
+  },
+  {
+    "ParameterKey": "MinSize",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "MaxSize",
+    "ParameterValue": "6"
+  },
+  {
+    "ParameterKey": "DesiredCapacity",
+    "ParameterValue": "2"
+  }
+]

@@ -258,6 +258,37 @@ def degraded_result(path: str, reason: str) -> Dict[str, Any]:
 #: optional, so the framework list is not a knob we default to the narrow answer.
 DEFAULT_FRAMEWORKS = ("terraform", "secrets")
 
+#: Checkov frameworks are per-language and OPT-IN. A CloudFormation scan run under
+#: `--framework terraform` finds NOTHING (Checkov never parses the template); the
+#: same is true for Kubernetes and Compose. So the framework set is selected per
+#: IaC format, not defaulted to the Terraform answer. `secrets` rides along on
+#: every format for the same reason it does on Terraform: hardcoded credentials
+#: are format-agnostic and among the highest-value findings there are.
+#:
+#: Docker Compose has no dedicated Checkov framework; `dockerfile` is the closest
+#: container-image lens, and `secrets` catches credentials smuggled into a
+#: compose file's `environment:` block.
+FRAMEWORKS_BY_FORMAT = {
+    "terraform": ("terraform", "secrets"),
+    "cloudformation": ("cloudformation", "secrets"),
+    "kubernetes": ("kubernetes", "secrets"),
+    "docker-compose": ("dockerfile", "secrets"),
+    "docker_compose": ("dockerfile", "secrets"),
+    "compose": ("dockerfile", "secrets"),
+}
+
+
+def frameworks_for_format(iac_format: Optional[str]) -> Tuple[str, ...]:
+    """Map an IaC format keyword to its Checkov framework set.
+
+    Unknown/None format -> the Terraform default, so existing callers are
+    unaffected. The adapter boundary holds: framework selection is the ONLY
+    format-specific knob, and nothing Checkov-native crosses out of this module.
+    """
+    if not iac_format:
+        return DEFAULT_FRAMEWORKS
+    return FRAMEWORKS_BY_FORMAT.get(iac_format.lower(), DEFAULT_FRAMEWORKS)
+
 
 def run_checkov(
     path: str, framework: Union[str, Sequence[str]] = DEFAULT_FRAMEWORKS
@@ -336,10 +367,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("path", help="Directory to scan")
     parser.add_argument(
+        "--format",
+        help="IaC format (terraform | cloudformation | kubernetes | docker-compose). "
+        "Selects the Checkov framework set. Default: terraform.",
+    )
+    parser.add_argument(
         "--framework",
         action="append",
-        help="Checkov framework; repeatable. Default: terraform + secrets (secrets "
-        "catches hardcoded credentials, which terraform-only scanning misses).",
+        help="Checkov framework; repeatable. Overrides --format. Default: the "
+        "framework set for --format (terraform + secrets), since a CloudFormation "
+        "scan run under --framework terraform finds nothing.",
     )
     args = parser.parse_args(argv)
 
@@ -347,8 +384,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: not a directory: %s" % args.path, file=sys.stderr)
         return 2
 
+    # Explicit --framework wins; otherwise select by --format.
+    frameworks = args.framework or frameworks_for_format(args.format)
+
     try:
-        result = run_checkov(args.path, args.framework or DEFAULT_FRAMEWORKS)
+        result = run_checkov(args.path, frameworks)
     except Exception as exc:  # noqa: BLE001 - scan error must exit 2 (SPEC §9.2)
         print("error: checkov adapter failed: %s" % exc, file=sys.stderr)
         return 2

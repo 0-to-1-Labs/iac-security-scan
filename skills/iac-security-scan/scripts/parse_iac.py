@@ -79,6 +79,17 @@ try:
 except ImportError:
     CFNLINT_AVAILABLE = False
 
+# Optional: ruamel.yaml for line-preserving YAML parsing (Kubernetes / Compose).
+# This is to the YAML formats what tfparse is to Terraform: the ONLY tier that
+# yields per-resource line provenance. Its round-trip loader records `.lc.line`
+# on every node. Absent it, the YAML formats fall back to PyYAML, which has no
+# line numbers -> a DEGRADED scan (no SARIF, no patches), reported as one.
+try:
+    from ruamel.yaml import YAML as _RuamelYAML
+    RUAMEL_AVAILABLE = True
+except ImportError:
+    RUAMEL_AVAILABLE = False
+
 
 def is_github_url(path):
     """Check if the path is a GitHub URL."""
@@ -281,6 +292,166 @@ def build_location(file_path, start_line, end_line, address, resource_type, root
         "resourceType": resource_type,
         "service": derive_service(resource_type),
     }
+
+
+def build_yaml_location(file_path, start_line, end_line, address, resource_type,
+                        service, root=None):
+    """The same §5 `location` shape as build_location, but for the YAML-based
+    formats (CloudFormation / Kubernetes / Docker Compose) whose `service` is not
+    derivable from an AWS `aws_*` resource-type slug. Field-for-field identical to
+    what the Terraform path emits — downstream code (SARIF, report, findings)
+    joins on it, so it must not improvise fields.
+    """
+    # Absolute-ize the file so normalize_repo_path can always take the relpath
+    # against the scan root — including the single-file case (CFN template,
+    # compose file) where the given path IS the root, which the relative-path
+    # branch would otherwise leave un-shortened.
+    norm_file = os.path.abspath(file_path) if file_path else file_path
+    return {
+        "file": normalize_repo_path(norm_file, root),
+        "startLine": start_line,
+        "endLine": end_line,
+        "resourceAddress": address,
+        "resourceType": resource_type,
+        "service": service,
+    }
+
+
+def _mark_line(node, attr):
+    """1-based line for a cfn-lint decoded node's start/end mark, or None.
+
+    cfn-lint decorates every decoded node with 0-based `start_mark` / `end_mark`.
+    """
+    mark = getattr(node, attr, None)
+    line = getattr(mark, "line", None)
+    return (line + 1) if line is not None else None
+
+
+def cfn_resource_line_index(resources_node):
+    """{logical_id: (startLine, endLine)} 1-based, from cfn-lint's line marks.
+
+    `startLine` is the line of the logical-ID key (what Checkov reports too).
+    `endLine` is the resource value's end mark, capped at the next resource's
+    start so trailing comments/blank lines don't bleed one block into the next.
+    Returns {} if the node carries no marks (e.g. a plain dict from a JSON reload).
+    """
+    entries = []
+    try:
+        keys = list(resources_node.keys())
+    except AttributeError:
+        return {}
+    for key in keys:
+        value = resources_node[key]
+        start = _mark_line(key, "start_mark")
+        raw_end = getattr(getattr(value, "end_mark", None), "line", None)
+        entries.append((str(key), start, raw_end))
+
+    index = {}
+    for i, (lid, start, raw_end) in enumerate(entries):
+        end = raw_end
+        next_start = entries[i + 1][1] if i + 1 < len(entries) else None
+        if next_start is not None:
+            capped = next_start - 1
+            if end is None or end > capped:
+                end = capped
+        if start is not None and end is not None and end < start:
+            end = start
+        index[lid] = (start, end)
+    return index
+
+
+def _file_line_count(path):
+    try:
+        with open(path, "r") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return None
+
+
+def kubernetes_line_index(yaml_file):
+    """{(kind, name): (startLine, endLine)} 1-based for one manifest file.
+
+    A Kubernetes resource IS a YAML document, so its block spans from the
+    document's first line to the line before the next document (or EOF for the
+    last). Returns None when ruamel is unavailable (the DEGRADED signal).
+    """
+    if not RUAMEL_AVAILABLE:
+        return None
+    try:
+        ry = _RuamelYAML()
+        with open(yaml_file, "r") as fh:
+            docs = list(ry.load_all(fh))
+    except Exception:
+        return None
+
+    total = _file_line_count(yaml_file)
+    starts = []
+    for doc in docs:
+        line = getattr(getattr(doc, "lc", None), "line", None)
+        starts.append((line + 1) if line is not None else None)
+
+    index = {}
+    for i, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            continue
+        start = starts[i]
+        end = None
+        for j in range(i + 1, len(starts)):
+            if starts[j] is not None:
+                end = starts[j] - 1
+                break
+        if end is None:
+            end = total
+        if start is not None and end is not None and end < start:
+            end = start
+        kind = doc.get("kind")
+        name = (doc.get("metadata") or {}).get("name")
+        index[(str(kind), str(name))] = (start, end)
+    return index
+
+
+def compose_line_index(path):
+    """{service_name: (startLine, endLine)} 1-based for a Docker Compose file.
+
+    Each service block runs from its key line to the line before the next
+    service (or EOF for the last). Returns None when ruamel is unavailable.
+    """
+    if not RUAMEL_AVAILABLE:
+        return None
+    try:
+        ry = _RuamelYAML()
+        with open(path, "r") as fh:
+            data = ry.load(fh)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return {}
+    services = data.get("services")
+    if not isinstance(services, dict):
+        return {}
+
+    total = _file_line_count(path)
+    lc = getattr(services, "lc", None)
+    lc_data = getattr(lc, "data", None) if lc is not None else None
+
+    key_lines = {}
+    for name in services.keys():
+        info = lc_data.get(name) if isinstance(lc_data, dict) else None
+        key_lines[str(name)] = (info[0] + 1) if info else None
+
+    ordered = sorted(
+        ((n, s) for n, s in key_lines.items() if s is not None),
+        key=lambda pair: pair[1],
+    )
+    index = {}
+    for idx, (name, start) in enumerate(ordered):
+        end = ordered[idx + 1][1] - 1 if idx + 1 < len(ordered) else total
+        if end is not None and end < start:
+            end = start
+        index[name] = (start, end)
+    for name, start in key_lines.items():
+        index.setdefault(name, (start, start))
+    return index
 
 
 def parse_terraform(path):
@@ -816,23 +987,31 @@ def parse_cloudformation(path):
     return parse_cloudformation_with_yaml(path)
 
 
+def _cfn_decode(path):
+    """Decode a CFN template via cfn-lint, tolerant of the loader's return shape.
+
+    Older cfn-lint returned `(template, matches)`; current versions return just
+    the decorated template node. Handle both so the line-mark tier does not
+    silently regress to the PyYAML fallback on a version bump.
+    """
+    loaded = cfn_json.load(path) if path.endswith('.json') else cfn_yaml.load(path)
+    if isinstance(loaded, tuple):
+        return loaded[0]
+    return loaded
+
+
 def parse_cloudformation_with_cfnlint(path):
     """
     Parse CloudFormation using cfn-lint.
-    Provides intrinsic function resolution and accurate dependency tracking.
+    Provides intrinsic function resolution and accurate dependency tracking, and
+    — the reason this is the FULL tier — per-resource line provenance from
+    cfn-lint's decoded line marks.
     """
     try:
-        # Decode the template using cfn-lint
-        if path.endswith('.json'):
-            template_data, matches = cfn_json.load(path)
-        else:
-            template_data, matches = cfn_yaml.load(path)
+        template_data = _cfn_decode(path)
 
         if template_data is None:
             return {"error": "Failed to decode template"}
-
-        # Create a cfn-lint Template object for better analysis
-        cfn_template = CfnTemplate(path, template_data)
 
         resources = []
         cfn_resources = template_data.get('Resources', {})
@@ -840,8 +1019,15 @@ def parse_cloudformation_with_cfnlint(path):
         outputs = template_data.get('Outputs', {})
         conditions = template_data.get('Conditions', {})
 
+        # Per-logical-ID line ranges from cfn-lint's marks. If the marks are
+        # absent (e.g. a version that returns plain dicts) the index is empty and
+        # this tier degrades to no line numbers, surfaced via `degraded` below.
+        line_index = cfn_resource_line_index(cfn_resources)
+        missing_provenance = []
+
         for logical_id, resource in cfn_resources.items():
-            resource_type = resource.get('Type', 'Unknown')
+            logical_id = str(logical_id)
+            resource_type = str(resource.get('Type', 'Unknown'))
             properties = resource.get('Properties', {})
 
             # Extract provider and service from type (AWS::EC2::Instance -> AWS, EC2)
@@ -853,12 +1039,22 @@ def parse_cloudformation_with_cfnlint(path):
             # Get condition if present
             condition = resource.get('Condition')
 
+            start_line, end_line = line_index.get(logical_id, (None, None))
+            if start_line is None or end_line is None:
+                missing_provenance.append(logical_id)
+
+            location = build_yaml_location(
+                path, start_line, end_line, logical_id, resource_type, service,
+                root=path,
+            )
+
             resources.append({
                 "logical_id": logical_id,
                 "type": resource_type,
                 "provider": provider,
                 "service": service,
                 "resource_name": resource_name,
+                "location": location,
                 "properties": properties,
                 "condition": condition,
                 "depends_on": resource.get('DependsOn', []),
@@ -868,9 +1064,20 @@ def parse_cloudformation_with_cfnlint(path):
         # Extract dependencies using cfn-lint's graph capabilities
         dependencies = extract_cfnlint_dependencies(cfn_resources, parameters)
 
+        degraded = len(missing_provenance) == len(resources) and len(resources) > 0
+
         return {
             "format": "cloudformation",
             "parser": "cfn-lint",
+            "parseTier": "cfn-lint",
+            "degraded": degraded,
+            "degradationReason": (
+                "cfn-lint decoded the template but carried no line marks, so "
+                "findings cannot populate SARIF and cannot be auto-patched."
+            ) if degraded else None,
+            "lineProvenance": not degraded,
+            "resources_with_line_provenance": len(resources) - len(missing_provenance),
+            "resources_missing_line_provenance": missing_provenance,
             "resources": resources,
             "parameters": {k: {
                 "type": v.get('Type', 'String'),
@@ -1022,6 +1229,10 @@ def parse_cloudformation_with_yaml(path):
                 "type": resource_type,
                 "provider": provider,
                 "service": service,
+                # DEGRADED: PyYAML preserves no line numbers.
+                "location": build_yaml_location(
+                    path, None, None, logical_id, resource_type, service, root=path
+                ),
                 "properties": properties,
                 "depends_on": resource.get('DependsOn', [])
             })
@@ -1051,10 +1262,19 @@ def parse_cloudformation_with_yaml(path):
         return {
             "format": "cloudformation",
             "parser": "yaml",
+            "parseTier": "yaml",
+            "degraded": True,
+            "degradationReason": (
+                "Fell back to PyYAML (cfn-lint unavailable or failed). This tier "
+                "yields NO line numbers, so findings cannot populate SARIF and "
+                "cannot be auto-patched. Intrinsic functions are not resolved."
+            ),
+            "lineProvenance": False,
             "resources": resources,
             "parameters": list(parameters.keys()) if parameters else [],
             "outputs": list(outputs.keys()) if outputs else [],
             "total_resources": len(resources),
+            "resources_with_line_provenance": 0,
             "dependencies": dependencies
         }
 
@@ -1113,9 +1333,17 @@ def parse_kubernetes(path):
         return {"error": "No Kubernetes manifest files found", "resources": []}
 
     resources = []
+    # ruamel gives per-document line provenance; PyYAML (below) gives the data.
+    # If ruamel is unavailable, no line index -> a DEGRADED scan (no SARIF/patches).
+    any_line_index = RUAMEL_AVAILABLE
+    missing_provenance = []
 
     for yaml_file in yaml_files:
         print(f"  Reading: {yaml_file}")
+        line_index = kubernetes_line_index(yaml_file)
+        if line_index is None:
+            any_line_index = False
+            line_index = {}
         try:
             with open(yaml_file, 'r') as f:
                 # Handle multi-document YAML (--- separator)
@@ -1136,6 +1364,13 @@ def parse_kubernetes(path):
                     annotations = metadata.get('annotations', {})
                     owner_refs = metadata.get('ownerReferences', [])
 
+                    start_line, end_line = line_index.get(
+                        (str(kind), str(name)), (None, None)
+                    )
+                    address = f"{kind}/{name}"
+                    if start_line is None:
+                        missing_provenance.append(address)
+
                     resource = {
                         "kind": kind,
                         "apiVersion": api_version,
@@ -1145,6 +1380,10 @@ def parse_kubernetes(path):
                         "annotations": annotations,
                         "owner_references": owner_refs,
                         "file": yaml_file,
+                        "location": build_yaml_location(
+                            yaml_file, start_line, end_line, address, kind,
+                            "kubernetes", root=path,
+                        ),
                         "spec": spec,  # Keep full spec for relationship analysis
                     }
 
@@ -1173,9 +1412,20 @@ def parse_kubernetes(path):
             by_kind[kind] = []
         by_kind[kind].append(r["name"])
 
+    degraded = not any_line_index
     return {
         "format": "kubernetes",
-        "parser": "enhanced",
+        "parser": "ruamel" if any_line_index else "yaml",
+        "parseTier": "ruamel" if any_line_index else "yaml",
+        "degraded": degraded,
+        "degradationReason": (
+            "ruamel.yaml is unavailable, so Kubernetes manifests were parsed "
+            "without line numbers. Findings cannot populate SARIF and cannot be "
+            "auto-patched. Install it with: pip install ruamel.yaml"
+        ) if degraded else None,
+        "lineProvenance": not degraded,
+        "resources_with_line_provenance": len(resources) - len(missing_provenance),
+        "resources_missing_line_provenance": missing_provenance,
         "resources": resources,
         "total_resources": len(resources),
         "namespaces": list(set(r["namespace"] for r in resources)),
@@ -1579,6 +1829,13 @@ def parse_docker_compose(path):
         networks = compose.get('networks', {})
         volumes = compose.get('volumes', {})
 
+        # ruamel supplies per-service line provenance; None -> DEGRADED scan.
+        line_index = compose_line_index(path)
+        any_line_index = line_index is not None
+        if line_index is None:
+            line_index = {}
+        missing_provenance = []
+
         service_list = []
         dependencies = {}
 
@@ -1595,6 +1852,10 @@ def parse_docker_compose(path):
 
             service_volumes = service_config.get('volumes', [])
 
+            start_line, end_line = line_index.get(str(service_name), (None, None))
+            if start_line is None:
+                missing_provenance.append(service_name)
+
             service_list.append({
                 "name": service_name,
                 "image": service_config.get('image'),
@@ -1602,7 +1863,11 @@ def parse_docker_compose(path):
                 "ports": service_config.get('ports', []),
                 "environment": service_config.get('environment', {}),
                 "networks": service_networks,
-                "volumes": service_volumes
+                "volumes": service_volumes,
+                "location": build_yaml_location(
+                    path, start_line, end_line, service_name, "service",
+                    "docker-compose", root=path,
+                ),
             })
 
             dependencies[service_name] = {
@@ -1610,8 +1875,20 @@ def parse_docker_compose(path):
                 "networks": service_networks
             }
 
+        degraded = not any_line_index
         return {
             "format": "docker-compose",
+            "parser": "ruamel" if any_line_index else "yaml",
+            "parseTier": "ruamel" if any_line_index else "yaml",
+            "degraded": degraded,
+            "degradationReason": (
+                "ruamel.yaml is unavailable, so the Compose file was parsed "
+                "without line numbers. Findings cannot populate SARIF and cannot "
+                "be auto-patched. Install it with: pip install ruamel.yaml"
+            ) if degraded else None,
+            "lineProvenance": not degraded,
+            "resources_with_line_provenance": len(service_list) - len(missing_provenance),
+            "resources_missing_line_provenance": missing_provenance,
             "services": service_list,
             "networks": list(networks.keys()),
             "volumes": list(volumes.keys()),
