@@ -49,6 +49,7 @@ THE SAFETY LINE (SPEC §6.3) -- read before touching `is_auto_applicable`:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import difflib
 import json
 import os
@@ -224,6 +225,44 @@ class TerraformPatch:
 
 
 @dataclass
+class FilePatch:
+    """Every change for ONE file, merged into ONE diff against the pristine file.
+
+    This exists because a *set* of per-resource diffs is not applicable. Each
+    TerraformPatch.diff is computed against the pristine file, so the first one
+    to land shifts every later hunk's line numbers out from under it:
+
+        git apply all-patches.diff
+          error: patch failed: s3.tf:248
+          error: s3.tf: patch does not apply
+
+    Per-resource diffs stay -- they are the right thing to *show* next to a
+    single finding. But anything that APPLIES diffs (exportPatchFiles, --fix,
+    a PR suggestion) must use these instead. A tool whose headline output is
+    "here are the fixes" cannot emit fixes that do not apply.
+    """
+
+    file: str
+    diff: str
+    changes: List[PatchChange]
+    ruleIds: List[str]
+    findingIds: List[str]
+    patchCount: int
+    autoApplicable: bool  # true only if EVERY constituent patch is auto-applicable
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "file": self.file,
+            "diff": self.diff,
+            "ruleIds": list(self.ruleIds),
+            "findingIds": list(self.findingIds),
+            "patchCount": self.patchCount,
+            "autoApplicable": self.autoApplicable,
+            "changes": [c.to_dict() for c in self.changes],
+        }
+
+
+@dataclass
 class PatchApplicationResult:
     """(terraform-patch.ts:91)"""
 
@@ -317,13 +356,25 @@ def _substitute(text: str, ctx: Dict[str, str]) -> str:
 # ===========================================================================
 
 
+def _parse(root: str) -> Dict[str, Any]:
+    """Call the WS-1 parser with its progress chatter forced onto stderr.
+
+    `parse_iac.parse_terraform` prints its tier/degradation notices to stdout.
+    That is right for its own CLI and fatal for ours: stdout here is a JSON
+    channel, and a single stray "Parsing Terraform files in: ..." makes the
+    whole payload unparseable for every downstream consumer.
+    """
+    with contextlib.redirect_stdout(sys.stderr):
+        return parse_iac.parse_terraform(root)
+
+
 def load_terraform_resources(root: str) -> Tuple[List[TerraformResource], Dict[str, Any]]:
     """Load resources from `parse_iac.py`. Raises if the parser is degraded.
 
     A degraded tier (hcl2/regex) has no line numbers, and without line numbers
     there is no patching. We refuse rather than emit a diff we cannot anchor.
     """
-    parsed = parse_iac.parse_terraform(root)
+    parsed = _parse(root)
     if parsed.get("degraded"):
         raise RuntimeError(
             "DEGRADED PARSE (tier=%s): no line provenance, so no patches can be "
@@ -996,18 +1047,37 @@ def normalize_with_fmt(original: str, patched: str) -> str:
 
 
 def create_unified_diff(file: str, original: str, patched: str, context: int = 3) -> str:
-    """A real unified diff. infrabot hand-rolled a line-by-line pseudo-diff
-    (`terraform-patch.ts:842`) that `git apply` cannot consume; this one it can.
+    """A real unified diff, one `git apply` will actually take.
+
+    infrabot hand-rolled a line-by-line pseudo-diff (`terraform-patch.ts:842`)
+    that no patch tool can consume. This is difflib's.
+
+    `splitlines(keepends=True)`, NOT `split("\\n")`. A file ending in a newline
+    splits to a trailing `""` element, which difflib faithfully renders as a
+    phantom final line -- and `git apply` then fails hunting for context that
+    does not exist in the file:
+
+        error: while searching for:
+          }
+        }
+        <blank>
+        error: patch failed: glue.tf:239
+
+    Keeping the line terminators on the lines makes the last line of the file the
+    last line of the diff, which is what every patch tool expects.
     """
     diff = difflib.unified_diff(
-        original.split("\n"),
-        patched.split("\n"),
+        original.splitlines(keepends=True),
+        patched.splitlines(keepends=True),
         fromfile=f"a/{file}",
         tofile=f"b/{file}",
-        lineterm="",
         n=context,
     )
-    return "\n".join(diff)
+    text = "".join(diff)
+    # A patch whose final line has no terminator is rejected outright.
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text
 
 
 # ===========================================================================
@@ -1050,7 +1120,7 @@ def generate_security_patches(
     existing: set = {r.address for r in resources}
     if not parsed:
         try:
-            parsed = parse_iac.parse_terraform(root)
+            parsed = _parse(root)
         except Exception:  # noqa: BLE001 - existence check is best-effort
             parsed = {}
     existing |= {d.get("address", "") for d in parsed.get("data_sources", [])}
@@ -1123,6 +1193,101 @@ def generate_security_patches(
     return patches
 
 
+def _group_by_file(
+    patches: Sequence[TerraformPatch],
+    only_auto_applicable: bool,
+    result: Optional[PatchApplicationResult] = None,
+) -> Dict[str, List[TerraformPatch]]:
+    """Select the patches to act on and bucket them by file.
+
+    SPEC §6.3 rail 6: anything skipped is recorded with a reason. "A --fix run
+    that silently applies 4 of 11 fixes and says done is a liar."
+    """
+    by_file: Dict[str, List[TerraformPatch]] = {}
+    for patch in patches:
+        if only_auto_applicable and not patch.autoApplicable:
+            if result is not None:
+                result.skippedCount += 1
+                result.skipped.append(
+                    {
+                        "resource": patch.address,
+                        "rules": ",".join(patch.ruleIds),
+                        "reason": patch.autoApplyBlockedBy
+                        or "not marked auto-applicable in the fix catalog",
+                    }
+                )
+            continue
+        by_file.setdefault(patch.file, []).append(patch)
+    return by_file
+
+
+def _patched_content(
+    root: str,
+    file: str,
+    patches: Sequence[TerraformPatch],
+    by_address: Dict[str, TerraformResource],
+    use_fmt: bool,
+) -> Tuple[str, str, List[PatchChange]]:
+    """(original, patched, changes) for one file -- the SINGLE source of truth.
+
+    Both the emitted patch set and the on-disk apply go through here, so the
+    diff we hand a user and the edit we would make ourselves cannot drift apart.
+    """
+    with open(os.path.join(root, file), encoding="utf-8") as fh:
+        original = fh.read()
+    changes: List[PatchChange] = []
+    for patch in patches:
+        changes.extend(patch.changes)
+    patched = "\n".join(apply_changes_to_lines(original.split("\n"), changes, by_address))
+    if use_fmt:
+        patched = normalize_with_fmt(original, patched)
+    return original, patched, changes
+
+
+def generate_file_patches(
+    root: str,
+    patches: Sequence[TerraformPatch],
+    resources: Sequence[TerraformResource],
+    only_auto_applicable: bool = False,
+    use_fmt: bool = True,
+) -> List[FilePatch]:
+    """The APPLICABLE patch set: one coherent diff per file, against the pristine file.
+
+    This is what `export_patch_files`, `--fix`, and any "apply all" path must
+    consume. See FilePatch's docstring for why the per-resource diffs cannot be.
+    """
+    by_address = {r.address: r for r in resources}
+    out: List[FilePatch] = []
+
+    for file, file_patches in _group_by_file(patches, only_auto_applicable).items():
+        original, patched, changes = _patched_content(
+            root, file, file_patches, by_address, use_fmt
+        )
+        if patched == original:
+            continue
+        out.append(
+            FilePatch(
+                file=file,
+                diff=create_unified_diff(file, original, patched),
+                changes=changes,
+                ruleIds=sorted({r for p in file_patches for r in p.ruleIds}),
+                findingIds=sorted({f for p in file_patches for f in p.findingIds}),
+                patchCount=len(file_patches),
+                autoApplicable=all(p.autoApplicable for p in file_patches),
+            )
+        )
+
+    return sorted(out, key=lambda fp: fp.file)
+
+
+def write_patch_set(file_patches: Sequence[FilePatch], path: str) -> str:
+    """Write one `git apply`-able patch file covering the whole tree."""
+    with open(path, "w", encoding="utf-8") as fh:
+        for fp in file_patches:
+            fh.write(fp.diff)
+    return path
+
+
 def apply_patches_to_tree(
     root: str,
     patches: Sequence[TerraformPatch],
@@ -1135,41 +1300,21 @@ def apply_patches_to_tree(
     (terraform-patch.ts:918 `applyPatches`, but file-coherent -- infrabot applied
     patches by string-replacing `rawContent`, which corrupts a file the moment
     two resources in it share identical text.)
+
+    Shares `_patched_content()` with `generate_file_patches()`, so what we write
+    to disk is byte-for-byte what the emitted patch set would have produced.
     """
     result = PatchApplicationResult()
     by_address = {r.address: r for r in resources}
 
-    selected: List[TerraformPatch] = []
-    for patch in patches:
-        if only_auto_applicable and not patch.autoApplicable:
-            result.skippedCount += 1
-            result.skipped.append(
-                {
-                    "resource": patch.address,
-                    "rules": ",".join(patch.ruleIds),
-                    "reason": patch.autoApplyBlockedBy or "not marked auto-applicable in the fix catalog",
-                }
-            )
-            continue
-        selected.append(patch)
-
-    by_file: Dict[str, List[TerraformPatch]] = {}
-    for patch in selected:
-        by_file.setdefault(patch.file, []).append(patch)
+    by_file = _group_by_file(patches, only_auto_applicable, result)
 
     for file, file_patches in by_file.items():
         abs_path = os.path.join(root, file)
         try:
-            with open(abs_path, encoding="utf-8") as fh:
-                original = fh.read()
-            changes: List[PatchChange] = []
-            for patch in file_patches:
-                changes.extend(patch.changes)
-            patched = "\n".join(
-                apply_changes_to_lines(original.split("\n"), changes, by_address)
+            original, patched, _ = _patched_content(
+                root, file, file_patches, by_address, use_fmt
             )
-            if use_fmt:
-                patched = normalize_with_fmt(original, patched)
             if patched == original:
                 continue
             with open(abs_path, "w", encoding="utf-8") as fh:
@@ -1298,33 +1443,52 @@ def create_patch_branch(
 # ===========================================================================
 
 
-def export_patch_files(patches: Sequence[TerraformPatch], out_dir: str) -> List[str]:
+def export_patch_files(
+    file_patches: Sequence[FilePatch], out_dir: str
+) -> List[str]:
+    """Write the patch set to disk, one `git apply`-able file per source file.
+
+    Takes FilePatch, NOT TerraformPatch. That is the whole point: infrabot wrote
+    one .patch per resource, and a directory of per-resource patches against the
+    same file cannot be applied -- the second one always fails, because the first
+    shifted its line offsets. These apply.
+    """
     os.makedirs(out_dir, exist_ok=True)
     written: List[str] = []
-    for i, patch in enumerate(patches, start=1):
-        fname = f"{i}-{patch.severity}-{patch.resourceType}-{patch.resourceName}.patch"
-        path = os.path.join(out_dir, fname)
+    for i, fp in enumerate(file_patches, start=1):
+        stem = fp.file.replace("/", "-").removesuffix(".tf")
+        path = os.path.join(out_dir, f"{i:02d}-{stem}.patch")
         header = [
             "# Terraform Security Patch",
-            f"# Resource: {patch.address}",
-            f"# File: {patch.file}",
-            f"# Severity: {patch.severity}",
-            f"# Rules: {', '.join(patch.ruleIds)}",
-            f"# Finding IDs: {', '.join(patch.findingIds)}",
-            f"# Auto-applicable: {patch.autoApplicable}",
+            f"# File: {fp.file}",
+            f"# Resources patched: {fp.patchCount}",
+            f"# Rules: {', '.join(fp.ruleIds)}",
+            f"# Auto-applicable: {fp.autoApplicable}",
+            "",
+            "# Changes:",
         ]
-        if not patch.autoApplicable:
-            header.append(f"# Diff-only because: {patch.autoApplyBlockedBy}")
-        header += ["", "# Changes:"]
-        header += [f"# - {c.description}" for c in patch.changes]
-        header += ["", patch.diff, ""]
+        header += [f"# - {c.description}" for c in fp.changes]
+        header += [""]
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(header))
+            fh.write("\n".join(header) + "\n")
+            fh.write(fp.diff)
         written.append(path)
     return written
 
 
-def generate_patch_report(patches: Sequence[TerraformPatch]) -> str:
+def generate_patch_report(
+    patches: Sequence[TerraformPatch],
+    file_patches: Optional[Sequence[FilePatch]] = None,
+) -> str:
+    """Markdown report.
+
+    Two kinds of diff, deliberately:
+      * per FINDING  -- what a human reads. Someone looking at one finding wants
+        to see that one change, not the file's other six.
+      * per FILE     -- what a human APPLIES. Only this set survives `git apply`.
+
+    Showing only the first would hand the user diffs that fail on the second hunk.
+    """
     lines = ["# Terraform Security Patch Report", "", f"Total patches: {len(patches)}", ""]
     auto = sum(1 for p in patches if p.autoApplicable)
     lines += [
@@ -1333,6 +1497,8 @@ def generate_patch_report(patches: Sequence[TerraformPatch]) -> str:
         f"{auto} of {len(patches)} patches are auto-applicable "
         f"(additive, single-attribute, semantically unambiguous).",
         f"{len(patches) - auto} are diff-only and require review.",
+        "",
+        "## Findings",
         "",
     ]
     for patch in patches:
@@ -1345,7 +1511,29 @@ def generate_patch_report(patches: Sequence[TerraformPatch]) -> str:
         ]
         if not patch.autoApplicable:
             lines.append(f"- Diff-only because: {patch.autoApplyBlockedBy}")
-        lines += ["", "```diff", patch.diff, "```", ""]
+        lines += ["", "```diff", patch.diff.rstrip("\n"), "```", ""]
+
+    if file_patches:
+        lines += [
+            "## Applying these fixes",
+            "",
+            "The per-finding diffs above are for READING. They are each computed "
+            "against the pristine file, so applying several that touch the same "
+            "file will fail on the second one. To apply, use the coherent "
+            "per-file patch set below (`git apply`).",
+            "",
+        ]
+        for fp in file_patches:
+            lines += [
+                f"### `{fp.file}`  ({fp.patchCount} resources, "
+                f"{'auto-applicable' if fp.autoApplicable else 'review required'})",
+                "",
+                "```diff",
+                fp.diff.rstrip("\n"),
+                "```",
+                "",
+            ]
+
     return "\n".join(lines)
 
 
@@ -1363,6 +1551,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json-only", action="store_true", help="Emit only JSON on stdout")
     parser.add_argument("--markdown", action="store_true", help="Emit the markdown patch report")
     parser.add_argument("--no-fmt", action="store_true", help="Skip terraform fmt normalization")
+    parser.add_argument(
+        "--patch-set",
+        metavar="FILE",
+        help="Write the applicable (git apply-able) patch set to FILE",
+    )
+    parser.add_argument(
+        "--auto-only",
+        action="store_true",
+        help="Restrict the patch set to auto-applicable fixes only",
+    )
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.path):
@@ -1385,23 +1583,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         patches = generate_security_patches(
             args.path, findings, catalog, resources, use_fmt=not args.no_fmt
         )
+        file_patches = generate_file_patches(
+            args.path, patches, resources,
+            only_auto_applicable=args.auto_only, use_fmt=not args.no_fmt,
+        )
     except Exception as exc:  # noqa: BLE001 -- scan error is exit 2 (SPEC §9.2)
         print(f"error: patch generation failed: {exc}", file=sys.stderr)
         return 2
 
+    if args.patch_set:
+        write_patch_set(file_patches, args.patch_set)
+        print(f"wrote patch set: {args.patch_set}", file=sys.stderr)
+
     if args.markdown:
-        print(generate_patch_report(patches))
+        print(generate_patch_report(patches, file_patches))
         return 0
 
-    fixed_rules = sorted({r for p in patches for r in p.ruleIds})
     out = {
         "path": os.path.abspath(args.path),
         "catalogSize": len(catalog),
         "totalFindings": len(findings),
+        # Per-finding diffs: for DISPLAY. Do not `git apply` these as a set --
+        # each is computed against the pristine file. Use `filePatches`.
         "patches": [p.to_dict() for p in patches],
         "patchCount": len(patches),
         "autoApplicableCount": sum(1 for p in patches if p.autoApplicable),
-        "rulesFixed": fixed_rules,
+        # Per-file diffs: the APPLICABLE set. This is what --fix and git apply use.
+        "filePatches": [fp.to_dict() for fp in file_patches],
+        "rulesFixed": sorted({r for p in patches for r in p.ruleIds}),
     }
     json.dump(out, sys.stdout, indent=2)
     print()
