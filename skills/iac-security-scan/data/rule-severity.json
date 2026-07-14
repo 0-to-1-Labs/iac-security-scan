@@ -1,0 +1,584 @@
+{
+  "_meta": {
+    "purpose": "Rule-ID -> baseline-severity seed. Checkov's community edition emits NO severity (verified: all 1317 Terraform resource checks in checkov 3.2.500 return severity=None; severity is a Bridgecrew/Prisma paid-platform feature). Severity feeds priorityScore -> isQuickWin -> the --severity floor -> CI exit codes -> SARIF security-severity. Without this file the product's entire ranking spine is null.",
+    "governance": "STATIC, CHECKED-IN, HUMAN-REVIEWED DATA. The model NEVER generates a baseline severity at runtime. The LLM may adjust a seed by at most +/-1 level, and only with severityAdjustedFrom plus a written justification -- it must adjust a REAL SEED, never invent one. A rule with no entry here resolves to the explicit sentinel 'unmapped'. It is NEVER defaulted to a middle value. Silence is safer than a guess.",
+    "sources": {
+      "checkov-metadata": "Checkov's own rule metadata. Yields nothing: OSS Checkov populates no severity on any check. Retained in the schema so that a future Checkov release, or a Prisma-licensed run, can be distinguished from our judgment.",
+      "prowler": "Vendor-assigned Severity from the installed Prowler check metadata (prowler 5.x, providers/aws/services/**/*.metadata.json -- 578 AWS checks). Concept-matched to the Checkov rule; the matched Prowler check ID is named in every rationale so a reviewer can verify the match.",
+      "curated": "Human judgment, reasoned from real AWS impact, where no authority covers the concept or where we deliberately deviate from one. SCRUTINIZE THESE HARDEST -- the rationale states the reasoning and any authority we overrode."
+    },
+    "severities": [
+      "critical",
+      "high",
+      "medium",
+      "low",
+      "informational"
+    ],
+    "corpusCoverage": "All 56 rule IDs that fire across the 5 Terraform fixtures (158 findings) are seeded, plus the well-known AWS criticals that do not fire on this corpus but must never resolve to 'unmapped' in a real repo.",
+    "lastReviewed": "2026-07-13 (GATE 1 -- pending human sign-off)",
+    "gate1": {
+      "reviewed": true,
+      "date": "2026-07-13",
+      "reviewer": "John P. Sasser",
+      "note": "Baseline severities are checked-in, human-reviewed data. The model never generates a baseline severity at runtime; it may only adjust a real seed +/-1 with a written reason. Unmapped is stated plainly, never defaulted."
+    }
+  },
+  "CKV_AWS_338": {
+    "severity": "medium",
+    "rationale": "GATE 1 (human review, 2026-07-13): raised low->medium to match Prowler's analog. Also the most frequent rule on the corpus (11x); at `low` it would have been invisible under the default --severity medium floor, silently hiding the single most common finding the product emits.",
+    "source": "gate1-reviewed",
+    "severityBefore": "low"
+  },
+  "CKV_AWS_158": {
+    "severity": "medium",
+    "rationale": "CloudWatch log group not encrypted with KMS. Logs routinely contain tokens, request bodies, and PII. Prowler: cloudwatch_log_group_kms_encryption_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV2_AWS_62": {
+    "severity": "medium",
+    "rationale": "S3 bucket has no event notifications. Detection/response gap -- object-level changes go unobserved. Prowler: s3_bucket_event_notifications_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_18": {
+    "severity": "medium",
+    "rationale": "S3 access logging absent -- detection gap, not direct exposure. You cannot investigate an incident on a bucket with no access log. Prowler: s3_bucket_server_access_logging_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_144": {
+    "severity": "low",
+    "rationale": "S3 cross-region replication disabled. Durability/DR control; no confidentiality or integrity impact. Prowler: s3_bucket_cross_region_replication = low.",
+    "source": "prowler"
+  },
+  "CKV_AWS_130": {
+    "severity": "medium",
+    "rationale": "Subnet assigns public IPs by default -- every instance launched into it lands on the internet unless explicitly overridden. Prowler: vpc_subnet_no_public_ip_by_default = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_355": {
+    "severity": "high",
+    "rationale": "IAM policy uses \"*\" as the resource for restrictable actions. Unconstrained resource scope is the standard precondition for lateral movement and data access beyond intent. Prowler rates the adjacent concepts high (iam_policy_allows_privilege_escalation, iam_inline_policy_no_administrative_privileges); no exact analog exists, so this is our call.",
+    "source": "curated"
+  },
+  "CKV_AWS_117": {
+    "severity": "low",
+    "rationale": "Lambda not configured inside a VPC. Defense-in-depth / egress-control gap; a non-VPC Lambda is not itself reachable from the internet. Prowler: awslambda_function_inside_vpc = low.",
+    "source": "prowler"
+  },
+  "CKV_AWS_116": {
+    "severity": "low",
+    "rationale": "Lambda has no dead-letter queue. Reliability and observability control -- failed invocations are lost silently. No security exposure. No Prowler analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_173": {
+    "severity": "medium",
+    "rationale": "Lambda environment variables not encrypted with a KMS CMK. Env vars are where function secrets live; at rest they are AWS-key encrypted but readable by anyone with lambda:GetFunctionConfiguration. Matches the infrabot fixture answer key (SECURITY_FLAWS.md TF-02 #5 = MEDIUM). Distinct from CKV_AWS_45, which detects secrets actually present.",
+    "source": "curated"
+  },
+  "CKV_AWS_272": {
+    "severity": "low",
+    "rationale": "Lambda code-signing not configured. Supply-chain integrity control -- valuable but rarely adopted, and its absence does not itself expose anything. No Prowler analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_115": {
+    "severity": "low",
+    "rationale": "Lambda has no reserved concurrency limit. Availability/blast-radius control (one function can exhaust account concurrency); not a confidentiality or integrity issue. No Prowler analog.",
+    "source": "curated"
+  },
+  "CKV2_AWS_53": {
+    "severity": "low",
+    "rationale": "API Gateway request validation not enabled. Defense-in-depth: pushes malformed input to the backend, which should be validating anyway. Not an exposure on its own. No Prowler analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_260": {
+    "severity": "medium",
+    "rationale": "GATE 1 (human review, 2026-07-13): reviewed and HELD at medium. Two authorities conflict (Prowler high, fixture answer key low for the analogous 443 rule); medium is the deliberate reconciliation. Security group allows 0.0.0.0/0 to port 80. Deliberately seeded BELOW Prowler's ec2_securitygroup_allow_ingress_from_internet_to_any_port (high): port 80 on a public web tier is frequently intentional, and the infrabot fixture answer key rates the analogous internet-open 443 rule LOW. Medium splits the difference -- cleartext HTTP from the internet is a real transport-security finding, but it is not the SSH/RDP/database exposure that earns a high. TWO AUTHORITIES CONFLICT HERE; this is our reconciliation.",
+    "source": "gate1-reviewed",
+    "severityBefore": "medium"
+  },
+  "CKV_AWS_195": {
+    "severity": "medium",
+    "rationale": "Glue component has no security configuration -- job bookmarks, CloudWatch logs, and S3 targets are written unencrypted. Prowler rates the Glue encryption family medium (glue_etl_jobs_cloudwatch_logs_encryption_enabled, glue_etl_jobs_job_bookmark_encryption_enabled, glue_ml_transform_encrypted_at_rest).",
+    "source": "prowler"
+  },
+  "CKV_AWS_300": {
+    "severity": "low",
+    "rationale": "S3 lifecycle does not abort incomplete multipart uploads. Cost and storage hygiene; no security impact. Prowler: s3_bucket_lifecycle_enabled = low.",
+    "source": "prowler"
+  },
+  "CKV_AWS_290": {
+    "severity": "high",
+    "rationale": "IAM policy grants write access without constraints. Unconstrained write is the direct precondition for privilege escalation and destructive action. Prowler rates the family high (iam_policy_allows_privilege_escalation, iam_inline_policy_no_administrative_privileges).",
+    "source": "prowler"
+  },
+  "CKV_AWS_288": {
+    "severity": "high",
+    "rationale": "IAM policy permits data exfiltration (unconstrained read/copy across services). Prowler has no exfiltration-specific check; seeded high to match the rest of the unconstrained-IAM family, since the outcome is bulk data loss.",
+    "source": "curated"
+  },
+  "CKV_AWS_21": {
+    "severity": "medium",
+    "rationale": "S3 bucket versioning disabled -- no recovery from overwrite or ransomware-style deletion. Prowler: s3_bucket_object_versioning = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_145": {
+    "severity": "medium",
+    "rationale": "S3 bucket not encrypted with a KMS CMK (AES256/SSE-S3 only). Loses key-usage audit and revocation. Prowler: s3_bucket_kms_encryption = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_163": {
+    "severity": "medium",
+    "rationale": "ECR image scanning on push disabled -- vulnerable images ship undetected. Prowler: ecr_repositories_scan_images_on_push_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_136": {
+    "severity": "medium",
+    "rationale": "ECR repository not encrypted with a KMS CMK. ECR is AES256-encrypted by default, so this is a key-custody upgrade, not the absence of encryption. Seeded consistently with the rest of the CMK-instead-of-AWS-key family (all medium in Prowler). No exact Prowler analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_51": {
+    "severity": "medium",
+    "rationale": "ECR image tags are mutable -- a deployed tag can be silently repointed at different code. Supply-chain integrity. Prowler: ecr_repositories_tag_immutability = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_150": {
+    "severity": "medium",
+    "rationale": "Load balancer has no deletion protection. Availability control. Prowler: elbv2_deletion_protection = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_131": {
+    "severity": "medium",
+    "rationale": "ALB does not drop invalid HTTP headers -- enables request smuggling / desync attacks against the backend. Prowler: elbv2_desync_mitigation_mode = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_2": {
+    "severity": "high",
+    "rationale": "GATE 1 (human review, 2026-07-13): raised medium->high. Cleartext credentials and session tokens crossing the public internet is a real exposure, not a hygiene gap. Overrides Prowler/FSBP deliberately.",
+    "source": "gate1-reviewed",
+    "severityBefore": "medium"
+  },
+  "CKV_AWS_378": {
+    "severity": "low",
+    "rationale": "Load balancer target group uses HTTP to the backend. This is LB-to-target traffic inside the VPC, not internet-facing -- materially lower than the cleartext frontend listener (CKV_AWS_2). Seeded one level below it. No Prowler analog.",
+    "source": "curated"
+  },
+  "CKV2_AWS_12": {
+    "severity": "high",
+    "rationale": "Default security group does not restrict all traffic. Anything launched without an explicit SG inherits it; CIS AWS 5.3. Prowler: ec2_securitygroup_default_restrict_traffic = high.",
+    "source": "prowler"
+  },
+  "CKV2_AWS_20": {
+    "severity": "medium",
+    "rationale": "ALB does not redirect HTTP to HTTPS -- clients that arrive on :80 stay in cleartext. Prowler: elbv2_ssl_listeners = medium.",
+    "source": "prowler"
+  },
+  "CKV2_AWS_28": {
+    "severity": "medium",
+    "rationale": "Public-facing ALB not protected by a WAF. Prowler: elbv2_waf_acl_attached = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_103": {
+    "severity": "medium",
+    "rationale": "Load balancer permits TLS below 1.2 -- downgrade and known-cipher attacks. Prowler: elbv2_insecure_ssl_ciphers = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_289": {
+    "severity": "high",
+    "rationale": "IAM policy allows permissions management / resource exposure without constraints (iam:Put*Policy, *:PutResourcePolicy). A principal that can rewrite policy can grant itself anything. Prowler: iam_policy_allows_privilege_escalation = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_26": {
+    "severity": "high",
+    "rationale": "SNS topic not encrypted at rest. Prowler: sns_topics_kms_encryption_at_rest_enabled = high. (Higher than the other at-rest-encryption seeds; taken from the authority as-is -- SNS payloads frequently carry alerts and PII in transit-adjacent storage.)",
+    "source": "prowler"
+  },
+  "CKV_AWS_316": {
+    "severity": "high",
+    "rationale": "CodeBuild project runs in privileged mode -- a compromised or malicious build escapes the container and takes the build host, including its role credentials. Prowler's closest concept, ecs_task_definitions_no_privileged_containers, is high. No exact CodeBuild analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_147": {
+    "severity": "medium",
+    "rationale": "CodeBuild project artifacts/logs not encrypted with a CMK. Build artifacts leak source and secrets. Prowler: codebuild_report_group_export_encrypted = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_91": {
+    "severity": "medium",
+    "rationale": "ELBv2 access logging disabled -- no record of who hit the front door. Prowler: elbv2_logging_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_79": {
+    "severity": "high",
+    "rationale": "IMDSv1 still enabled. The single most-exploited AWS misconfiguration: any SSRF in an app on the instance reads the instance role's credentials. Prowler: ec2_instance_imdsv2_enabled = high and ec2_launch_template_imdsv2_required = high. Matches the fixture answer key (SECURITY_FLAWS.md TF-01 #2 = HIGH).",
+    "source": "prowler"
+  },
+  "CKV_AWS_161": {
+    "severity": "medium",
+    "rationale": "RDS IAM database authentication not enabled -- long-lived static DB passwords instead of short-lived IAM tokens. Prowler: rds_instance_iam_authentication_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_354": {
+    "severity": "medium",
+    "rationale": "RDS Performance Insights not encrypted with a CMK. Performance Insights retains query text, which can embed literal values from application data. Consistent with the CMK family (Prowler rates RDS encryption checks medium). No exact Prowler analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_293": {
+    "severity": "medium",
+    "rationale": "Database instance has no deletion protection. Availability/durability. Prowler: rds_instance_deletion_protection = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_16": {
+    "severity": "high",
+    "rationale": "GATE 1 (human review, 2026-07-13): raised medium->high, overriding Prowler/FSBP RDS.3 to match infrabot's fixture answer key (SECURITY_FLAWS.md TF-01 #1), which WS-8 grades detection recall against. Unencrypted RDS at rest is conventionally a high; seed and answer key must not disagree.",
+    "source": "gate1-reviewed",
+    "severityBefore": "medium"
+  },
+  "CKV2_AWS_69": {
+    "severity": "high",
+    "rationale": "RDS not configured to require encryption in transit. Database credentials and query results cross the network in cleartext. Prowler: rds_instance_transport_encrypted = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_237": {
+    "severity": "informational",
+    "rationale": "API Gateway REST API lacks create_before_destroy. A Terraform lifecycle/availability concern during replacement. No security impact whatsoever -- seeded informational rather than inflated so it does not compete with real findings.",
+    "source": "curated"
+  },
+  "CKV_AWS_120": {
+    "severity": "informational",
+    "rationale": "API Gateway caching not enabled. Performance and cost; no security impact. (Distinct from CKV_AWS_276/CKV_AWS_225, which concern what the cache stores and logs.) Surfaced for completeness only.",
+    "source": "curated"
+  },
+  "CKV_AWS_76": {
+    "severity": "medium",
+    "rationale": "API Gateway access logging disabled -- no request-level audit trail for the public API surface. Prowler: apigateway_restapi_logging_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_276": {
+    "severity": "medium",
+    "rationale": "API Gateway method settings enable data trace, which writes full request/response payloads -- including auth headers and PII -- into CloudWatch logs. Prowler's nearest concept, cloudwatch_log_group_no_secrets_in_logs, is medium.",
+    "source": "curated"
+  },
+  "CKV_AWS_225": {
+    "severity": "informational",
+    "rationale": "API Gateway method-level caching not enabled. Performance control; no security impact. Same reasoning as CKV_AWS_120.",
+    "source": "curated"
+  },
+  "CKV_AWS_287": {
+    "severity": "high",
+    "rationale": "IAM policy allows credentials exposure (e.g. unconstrained iam:CreateAccessKey, sts:AssumeRole, secretsmanager:GetSecretValue on *). Direct path to durable credential theft. No exact Prowler analog; seeded to match the unconstrained-IAM family, which Prowler rates high.",
+    "source": "curated"
+  },
+  "CKV_AWS_119": {
+    "severity": "medium",
+    "rationale": "DynamoDB table not encrypted with a KMS CMK. Prowler: dynamodb_tables_kms_cmk_encryption_enabled = medium. Matches the fixture answer key (SECURITY_FLAWS.md TF-02 #2 = MEDIUM).",
+    "source": "prowler"
+  },
+  "CKV2_AWS_31": {
+    "severity": "medium",
+    "rationale": "WAFv2 web ACL has no logging configuration -- blocked-request evidence is not retained. Prowler: wafv2_webacl_logging_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV2_AWS_51": {
+    "severity": "medium",
+    "rationale": "API Gateway does not use client certificate authentication to the backend, so the backend cannot verify the request came from API Gateway. Prowler: apigateway_restapi_client_certificate_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV2_AWS_77": {
+    "severity": "medium",
+    "rationale": "API Gateway's attached WAFv2 web ACL has no AWS Managed Rules. A WAF with no rule groups is decorative. Prowler: apigateway_restapi_waf_acl_attached = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_159": {
+    "severity": "medium",
+    "rationale": "Athena workgroup does not enforce query-result encryption -- result sets from an encrypted lake land unencrypted in S3. Prowler: athena_workgroup_encryption = medium.",
+    "source": "prowler"
+  },
+  "CKV2_AWS_71": {
+    "severity": "low",
+    "rationale": "ACM certificate uses a wildcard domain. Widens blast radius if the private key is compromised, but a wildcard cert is a deliberate and extremely common architecture choice. No Prowler analog (its ACM checks cover expiry and key algorithm).",
+    "source": "curated"
+  },
+  "CKV2_AWS_11": {
+    "severity": "medium",
+    "rationale": "VPC flow logging not enabled. Network-level forensics are impossible after the fact. CIS AWS 3.9. Prowler: vpc_flow_logs_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_219": {
+    "severity": "medium",
+    "rationale": "CodePipeline artifact store not using a KMS CMK. Pipeline artifacts routinely contain source and build secrets. Consistent with codebuild_report_group_export_encrypted (Prowler = medium); no exact CodePipeline analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_20": {
+    "severity": "critical",
+    "rationale": "S3 bucket grants READ to everyone. Public data exposure -- the archetypal cloud breach. Prowler: s3_bucket_public_list_acl = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_57": {
+    "severity": "critical",
+    "rationale": "S3 bucket grants WRITE to everyone. Anyone on the internet can overwrite objects -- content injection, malware hosting, destruction. Prowler: s3_bucket_public_write_acl = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_70": {
+    "severity": "critical",
+    "rationale": "S3 bucket policy allows an action with any Principal. Prowler: s3_bucket_public_access = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_375": {
+    "severity": "critical",
+    "rationale": "S3 bucket has global view ACL permissions. Prowler: s3_bucket_public_list_acl = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_53": {
+    "severity": "medium",
+    "rationale": "GATE 1 (human review, 2026-07-13): lowered high->medium, deferring to Prowler's bucket-level PAB rating. A missing guardrail is not itself an exposure: if a bucket is actually public, that fires its own critical/high finding, so seeding PAB high double-counts the same risk.",
+    "source": "gate1-reviewed",
+    "severityBefore": "high"
+  },
+  "CKV_AWS_54": {
+    "severity": "medium",
+    "rationale": "GATE 1 (human review, 2026-07-13): lowered high->medium. Same reasoning as CKV_AWS_53.",
+    "source": "gate1-reviewed",
+    "severityBefore": "high"
+  },
+  "CKV_AWS_55": {
+    "severity": "medium",
+    "rationale": "GATE 1 (human review, 2026-07-13): lowered high->medium. Same reasoning as CKV_AWS_53.",
+    "source": "gate1-reviewed",
+    "severityBefore": "high"
+  },
+  "CKV_AWS_56": {
+    "severity": "medium",
+    "rationale": "GATE 1 (human review, 2026-07-13): lowered high->medium. Same reasoning as CKV_AWS_53.",
+    "source": "gate1-reviewed",
+    "severityBefore": "high"
+  },
+  "CKV_AWS_19": {
+    "severity": "medium",
+    "rationale": "S3 bucket not encrypted at rest. Prowler: s3_bucket_default_encryption = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_379": {
+    "severity": "medium",
+    "rationale": "S3 bucket has no secure-transport (aws:SecureTransport) policy -- objects may be fetched over plain HTTP. Prowler: s3_bucket_secure_transport_policy = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_24": {
+    "severity": "high",
+    "rationale": "Security group allows 0.0.0.0/0 to port 22 (SSH). Prowler: ec2_securitygroup_allow_ingress_from_internet_to_tcp_port_22 = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_25": {
+    "severity": "high",
+    "rationale": "Security group allows 0.0.0.0/0 to port 3389 (RDP). Prowler: ec2_securitygroup_allow_ingress_from_internet_to_tcp_port_3389 = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_277": {
+    "severity": "critical",
+    "rationale": "Security group allows 0.0.0.0/0 to port -1, i.e. ALL ports open to the internet. Prowler: ec2_securitygroup_allow_ingress_from_internet_to_all_ports = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_382": {
+    "severity": "low",
+    "rationale": "Security group allows unrestricted egress to all ports. Egress filtering is a genuine exfiltration control, but wide-open egress is the AWS default and near-universal; seeded low so it does not drown the ingress findings that actually let attackers in. No Prowler analog.",
+    "source": "curated"
+  },
+  "CKV_AWS_23": {
+    "severity": "informational",
+    "rationale": "Security group or rule has no description. Documentation hygiene; zero security impact. Seeded informational rather than low to keep it out of the way.",
+    "source": "curated"
+  },
+  "CKV_AWS_17": {
+    "severity": "critical",
+    "rationale": "RDS instance is publicly accessible. A database with a public endpoint is one credential away from total data loss. Prowler: rds_instance_no_public_access = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_302": {
+    "severity": "critical",
+    "rationale": "DB snapshot is public -- a full copy of the database, restorable by anyone. Prowler: rds_snapshots_public_access = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_41": {
+    "severity": "critical",
+    "rationale": "Hard-coded AWS access key and secret key in a provider block. Long-lived root-adjacent credentials committed to source control. Prowler's analogous secret-in-source check (codebuild_project_source_repo_url_no_sensitive_credentials) is critical.",
+    "source": "curated"
+  },
+  "CKV_AWS_45": {
+    "severity": "critical",
+    "rationale": "Hard-coded secrets in Lambda environment variables. Prowler: awslambda_function_no_secrets_in_variables = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_46": {
+    "severity": "critical",
+    "rationale": "Hard-coded secrets in EC2 user data. User data is readable by anything that can reach IMDS on the instance. Prowler: awslambda_function_no_secrets_in_code = critical (same concept: a secret literal committed into deployable code).",
+    "source": "prowler"
+  },
+  "CKV_AWS_301": {
+    "severity": "critical",
+    "rationale": "Lambda function is publicly accessible (resource policy allows any principal to invoke). Prowler: awslambda_function_not_publicly_accessible = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_32": {
+    "severity": "critical",
+    "rationale": "ECR repository policy is public -- anyone can pull (and, with write, poison) your container images. Prowler: ecr_repositories_not_publicly_accessible = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_168": {
+    "severity": "critical",
+    "rationale": "SQS queue policy is public. Prowler: sqs_queues_not_publicly_accessible = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_169": {
+    "severity": "high",
+    "rationale": "SNS topic policy is public. Prowler: sns_topics_not_publicly_accessible = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_27": {
+    "severity": "medium",
+    "rationale": "SQS queue not encrypted at rest. Prowler: sqs_queues_server_side_encryption_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_49": {
+    "severity": "high",
+    "rationale": "IAM policy document allows \"*\" as a statement's actions. Unbounded action scope. Prowler: iam_aws_attached_policy_no_administrative_privileges / iam_inline_policy_no_administrative_privileges = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_62": {
+    "severity": "high",
+    "rationale": "IAM policy grants full \"*:*\" administrative privileges. Prowler: iam_aws_attached_policy_no_administrative_privileges = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_63": {
+    "severity": "high",
+    "rationale": "IAM policy document allows \"*\" as a statement's actions. Same family as CKV_AWS_49. Prowler: iam_inline_policy_no_administrative_privileges = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_274": {
+    "severity": "high",
+    "rationale": "Role, user, or group uses the AWS AdministratorAccess managed policy. Prowler: iam_role_administratoraccess_policy = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_60": {
+    "severity": "high",
+    "rationale": "IAM role trust policy does not restrict who may assume it. A wildcard principal on an assume-role policy is an account takeover primitive. Prowler: iam_no_custom_policy_permissive_role_assumption = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_61": {
+    "severity": "high",
+    "rationale": "IAM policy allows assume-role across all services/principals. Prowler: iam_no_custom_policy_permissive_role_assumption = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_286": {
+    "severity": "high",
+    "rationale": "IAM policy allows privilege escalation. Prowler: iam_policy_allows_privilege_escalation = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_107": {
+    "severity": "high",
+    "rationale": "IAM policy document allows credentials exposure. aws_iam_policy_document twin of CKV_AWS_287; same severity for the same reason.",
+    "source": "curated"
+  },
+  "CKV_AWS_108": {
+    "severity": "high",
+    "rationale": "IAM policy document allows data exfiltration. aws_iam_policy_document twin of CKV_AWS_288; same severity for the same reason.",
+    "source": "curated"
+  },
+  "CKV_AWS_109": {
+    "severity": "high",
+    "rationale": "IAM policy document allows permissions management / resource exposure without constraints. aws_iam_policy_document twin of CKV_AWS_289. Prowler: iam_policy_allows_privilege_escalation = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_110": {
+    "severity": "high",
+    "rationale": "IAM policy document allows privilege escalation. aws_iam_policy_document twin of CKV_AWS_286. Prowler: iam_policy_allows_privilege_escalation = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_111": {
+    "severity": "high",
+    "rationale": "IAM policy document allows write access without constraints. aws_iam_policy_document twin of CKV_AWS_290. Prowler: iam_policy_allows_privilege_escalation = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_7": {
+    "severity": "high",
+    "rationale": "Customer-managed KMS key does not have rotation enabled. Prowler: kms_cmk_rotation_enabled = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_33": {
+    "severity": "critical",
+    "rationale": "KMS key policy contains a wildcard (*) principal -- anyone can use the key, which defeats every at-rest encryption control that depends on it. Prowler: kms_key_not_publicly_accessible = critical.",
+    "source": "prowler"
+  },
+  "CKV_AWS_35": {
+    "severity": "medium",
+    "rationale": "CloudTrail logs not encrypted at rest with a KMS CMK. Prowler: cloudtrail_kms_encryption_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_36": {
+    "severity": "medium",
+    "rationale": "CloudTrail log file validation disabled -- tampering with the audit trail becomes undetectable. Prowler: cloudtrail_log_file_validation_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_67": {
+    "severity": "high",
+    "rationale": "CloudTrail is not enabled in all regions -- activity in unmonitored regions is invisible, which is exactly where attackers operate. Prowler: cloudtrail_multi_region_enabled = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_28": {
+    "severity": "medium",
+    "rationale": "DynamoDB point-in-time recovery disabled. Prowler: dynamodb_tables_pitr_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_38": {
+    "severity": "high",
+    "rationale": "EKS public endpoint accessible from 0.0.0.0/0. Prowler: eks_cluster_not_publicly_accessible = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_39": {
+    "severity": "high",
+    "rationale": "EKS public endpoint enabled. Prowler: eks_cluster_not_publicly_accessible = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_58": {
+    "severity": "medium",
+    "rationale": "EKS cluster secrets not encrypted with a KMS CMK -- Kubernetes Secrets sit in etcd under the AWS-managed key only. Prowler: eks_cluster_kms_cmk_encryption_in_secrets_enabled = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_88": {
+    "severity": "medium",
+    "rationale": "EC2 instance has a public IP. Prowler: ec2_instance_public_ip = medium.",
+    "source": "prowler"
+  },
+  "CKV_AWS_87": {
+    "severity": "high",
+    "rationale": "Redshift cluster is publicly accessible. Prowler: redshift_cluster_public_access = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_149": {
+    "severity": "medium",
+    "rationale": "Secrets Manager secret not encrypted with a KMS CMK. Prowler rates the Secrets Manager hygiene family medium (secretsmanager_automatic_rotation_enabled, secretsmanager_secret_rotated_periodically); the secret is still encrypted under the AWS-managed key, so this is key custody, not exposure.",
+    "source": "curated"
+  },
+  "CKV_AWS_333": {
+    "severity": "high",
+    "rationale": "ECS service assigns public IPs to tasks automatically. Prowler: ecs_service_no_assign_public_ip = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_334": {
+    "severity": "high",
+    "rationale": "ECS container runs privileged -- container escape to the host and its instance role. Prowler: ecs_task_definitions_no_privileged_containers = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_335": {
+    "severity": "high",
+    "rationale": "ECS task definition shares the host namespace (pid/ipc), which collapses the container boundary. Prowler: ecs_task_definitions_host_namespace_not_shared = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_336": {
+    "severity": "high",
+    "rationale": "ECS container filesystem is not read-only. Prowler: ecs_task_definitions_containers_readonly_access = high.",
+    "source": "prowler"
+  },
+  "CKV_AWS_65": {
+    "severity": "low",
+    "rationale": "ECS cluster does not have Container Insights enabled. Observability/monitoring control -- no direct security exposure. Prowler: ecs_cluster_container_insights_enabled = medium; seeded one level lower because Container Insights is a metrics feature, not a security or audit control.",
+    "source": "curated"
+  }
+}

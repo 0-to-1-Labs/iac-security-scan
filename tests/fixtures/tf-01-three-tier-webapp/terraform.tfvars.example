@@ -1,0 +1,37 @@
+# AWS Configuration
+aws_region  = "us-east-1"
+environment = "production"
+
+# Project Configuration
+project_name = "webapp"
+
+# VPC Configuration
+vpc_cidr                = "10.0.0.0/16"
+public_subnet_cidrs     = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs    = ["10.0.11.0/24", "10.0.12.0/24"]
+database_subnet_cidrs   = ["10.0.21.0/24", "10.0.22.0/24"]
+
+# EC2 Configuration
+instance_type        = "t3.medium"
+asg_min_size         = 2
+asg_max_size         = 6
+asg_desired_capacity = 2
+
+# RDS Configuration
+db_instance_class           = "db.t3.medium"
+db_allocated_storage        = 100
+db_name                     = "webapp"
+db_username                 = "admin"
+db_password                 = "ChangeMe123!SecurePassword"  # Change this!
+db_backup_retention_period  = 7
+db_backup_window            = "03:00-04:00"
+db_maintenance_window       = "sun:04:00-sun:05:00"
+
+# Network Configuration
+enable_nat_gateway = true
+
+# Load Balancer Configuration
+health_check_path = "/health"
+
+# Optional: ACM Certificate ARN for HTTPS
+# certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012"

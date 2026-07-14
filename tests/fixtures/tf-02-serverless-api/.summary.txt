@@ -1,0 +1,62 @@
+Serverless API Terraform Workload - File Summary
+================================================
+
+Created: 2025-12-22
+Purpose: Production-realistic Terraform configuration with embedded security flaws for testing
+
+TERRAFORM FILES (10):
+- main.tf                 Provider config, data sources
+- variables.tf            Input variables with defaults
+- outputs.tf              Output values for API and resources
+- api-gateway.tf          REST API, resources, methods, integrations, stage
+- lambda.tf               5 Lambda functions with CloudWatch logs
+- dynamodb.tf             DynamoDB table with GSIs, streams, alarms
+- cognito.tf              User Pool, App Client, Identity Pool
+- iam.tf                  Lambda execution role and policies
+- waf.tf                  WAF Web ACL with managed rules
+- (No backend.tf - local state)
+
+LAMBDA FUNCTIONS (5):
+- lambda_functions/create_item.js    POST /items
+- lambda_functions/get_item.js       GET /items/{id}
+- lambda_functions/list_item.js      GET /items
+- lambda_functions/update_item.js    PUT /items/{id}
+- lambda_functions/delete_item.js    DELETE /items/{id}
+
+DOCUMENTATION (2):
+- README.md               Complete architecture and usage documentation
+- SECURITY_FLAWS.md       Detailed list of 5 embedded security issues
+
+ARCHITECTURE COMPONENTS:
+✓ API Gateway REST API (regional)
+✓ 5 Lambda functions (Node.js 18.x)
+✓ DynamoDB table with 3 GSIs
+✓ Cognito User Pool + Identity Pool
+✓ WAF Web ACL with 5 rules
+✓ CloudWatch Logs (Lambda, WAF)
+✓ X-Ray tracing
+✓ IAM roles and policies
+✓ CloudWatch alarms (DynamoDB, WAF)
+
+EMBEDDED SECURITY FLAWS (5):
+1. CRITICAL - Lambda IAM role with dynamodb:* wildcard permissions
+2. HIGH     - DynamoDB table without customer-managed KMS encryption
+3. MEDIUM   - API Gateway stage without access logging
+4. HIGH     - Cognito User Pool without MFA enforcement (mfa_configuration = "OFF")
+5. CRITICAL - Lambda environment variables with hardcoded secrets (DB_PASSWORD, API_KEY)
+
+TERRAFORM VERSION: >= 1.5.0
+AWS PROVIDER: ~> 5.0
+ARCHIVE PROVIDER: ~> 2.4
+
+VALIDATION STATUS:
+- Syntax: Valid Terraform 1.5+ syntax
+- Deployability: Fully deployable (requires AWS credentials)
+- Lambda Code: Working Node.js code with proper error handling
+- Security Flaws: Intentionally embedded for testing purposes
+
+EXPECTED SCAN RESULTS:
+When scanned with Prowler/Checkov/InfraBot, expect:
+- 2 CRITICAL findings (IAM wildcards, hardcoded secrets)
+- 2 HIGH findings (DynamoDB encryption, Cognito MFA)
+- 1 MEDIUM finding (API Gateway logging)
