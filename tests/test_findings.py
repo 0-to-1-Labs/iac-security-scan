@@ -173,9 +173,11 @@ class TestSeverityMapData:
     def test_rule_ids_are_well_formed(self, raw_severity_map):
         # CKV_SECRET_* is Checkov's cross-provider secrets framework (hardcoded
         # credentials), which we scan by default -- see run_checkov.
+        # CKV_K8S_* / CKV2_K8S_* are Checkov's Kubernetes framework, seeded in
+        # WS-14 (Phase 3) and flagged pendingGate1Review in _meta.kubernetesSeeds.
         for rule_id in raw_severity_map:
             assert rule_id.startswith(
-                ("CKV_AWS_", "CKV2_AWS_", "CKV_SECRET_", "IACSEC-")
+                ("CKV_AWS_", "CKV2_AWS_", "CKV_SECRET_", "CKV_K8S_", "CKV2_K8S_", "IACSEC-")
             ), rule_id
 
     def test_map_is_not_writable_at_runtime(self, severity_map):

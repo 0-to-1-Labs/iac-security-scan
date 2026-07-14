@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  web:
+    image: nginx:latest
+    privileged: true
+    ports:
+      - "80:80"
+    environment:
+      - API_KEY=sk-prod-1234567890abcdef
+    cap_add:
+      - SYS_ADMIN
+
+  db:
+    image: postgres:latest
+    privileged: true
+    environment:
+      - POSTGRES_PASSWORD=hunter2-prod
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

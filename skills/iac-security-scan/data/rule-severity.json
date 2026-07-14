@@ -20,8 +20,119 @@
       "reviewed": true,
       "date": "2026-07-13",
       "reviewer": "John P. Sasser",
-      "note": "Baseline severities are checked-in, human-reviewed data. The model never generates a baseline severity at runtime; it may only adjust a real seed +/-1 with a written reason. Unmapped is stated plainly, never defaulted."
+      "note": "Baseline severities are checked-in, human-reviewed data. The model never generates a baseline severity at runtime; it may only adjust a real seed +/-1 with a written reason. Unmapped is stated plainly, never defaulted. NOTE: the GATE-1 sign-off covers the AWS (CKV_AWS_*/CKV_SECRET_*) seeds only, NOT the CKV_K8S_* block below."
+    },
+    "kubernetesSeeds": {
+      "status": "PENDING GATE-1 REVIEW",
+      "addedBy": "WS-14 (Phase 3, K8s/Compose format parity)",
+      "note": "The 15 CKV_K8S_* / CKV2_K8S_* seeds carry source='curated' and pendingGate1Review=true. They are hand-curated from the CIS Kubernetes Benchmark impact model for the security-meaningful rules that fire on tests/fixtures/k8s-01-workloads. They are NOT yet human-reviewed and must be signed off exactly like the AWS seeds were. The six availability/reliability rules that also fire (CKV_K8S_8/9 probes, CKV_K8S_10/11/12/13 cpu+mem requests/limits) are DELIBERATELY left unmapped -- their severity is genuinely debatable and they are hygiene, not a security posture.",
+      "reviewChecklist": "Confirm: privileged=critical (CKV_K8S_16); host-namespace/root/privesc=high (17,19,20,23); capabilities/seccomp/securityContext/SA-token/latest-tag/NetworkPolicy=medium (22,28,37,31,29,38,14,CKV2_K8S_6); digest/high-UID=low (43,40)."
     }
+  },
+  "CKV_K8S_16": {
+    "severity": "critical",
+    "rationale": "Privileged container (CIS Kubernetes; Checkov `kubernetes`). A privileged container runs with all capabilities and host device access -- container escape to node root is trivial. Highest-consensus critical in the K8s corpus. Seeded critical.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_17": {
+    "severity": "high",
+    "rationale": "Container shares the host PID namespace (hostPID). Grants visibility into and signalling of every process on the node -- a strong escape/credential-theft aid. Seeded high.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_19": {
+    "severity": "high",
+    "rationale": "Container shares the host network namespace (hostNetwork). Binds host interfaces, can sniff node traffic, and bypasses NetworkPolicy entirely. Seeded high.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_20": {
+    "severity": "high",
+    "rationale": "allowPrivilegeEscalation is not disabled. Lets a process gain more privileges than its parent (setuid/setgid), the mechanism behind most in-container privesc. Seeded high.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_23": {
+    "severity": "high",
+    "rationale": "Root container (runAsNonRoot not enforced / runAsUser 0). Root inside the container plus any escape is root on the node; also defeats most other hardening. Seeded high.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_22": {
+    "severity": "medium",
+    "rationale": "Root filesystem is not read-only. A writable rootfs eases malware persistence and binary tampering. Defense-in-depth; seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_28": {
+    "severity": "medium",
+    "rationale": "Container may hold the NET_RAW capability. Enables raw sockets -- ARP/DNS spoofing and packet crafting from the pod. Seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_37": {
+    "severity": "medium",
+    "rationale": "Container is granted (or not restricted from) Linux capabilities. Extra capabilities broaden the escape surface; the guidance is to drop ALL and add back the minimum. Seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_31": {
+    "severity": "medium",
+    "rationale": "No seccomp profile (docker/default or runtime/default) is set. Without seccomp the container has the full syscall surface, widening kernel-exploit reach. Seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_29": {
+    "severity": "medium",
+    "rationale": "No securityContext applied to the pod/containers. Absent a securityContext the workload runs with permissive defaults and none of the above controls. Seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_38": {
+    "severity": "medium",
+    "rationale": "Service Account token is auto-mounted where it may not be needed. A mounted SA token is a live API credential usable for lateral movement if the pod is compromised. Seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_14": {
+    "severity": "medium",
+    "rationale": "Image tag is `latest`/blank (mutable). A mutable tag makes the running image non-reproducible and unverifiable, and silently changes on restart -- a supply-chain and rollback hazard. Seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV2_K8S_6": {
+    "severity": "medium",
+    "rationale": "Pod has no associated NetworkPolicy. Without one the pod sits on a flat, default-allow network -- any compromised neighbour can reach it. Seeded medium.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_43": {
+    "severity": "low",
+    "rationale": "Image is not pinned by digest. The stronger form of the mutable-tag problem; seeded low as defense-in-depth beyond CKV_K8S_14.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
+  },
+  "CKV_K8S_40": {
+    "severity": "low",
+    "rationale": "Container may run as a low UID that can collide with a host user. Host-UID-collision hardening; low impact on its own. Seeded low.",
+    "source": "curated",
+    "pendingGate1Review": true,
+    "severityBefore": "unmapped"
   },
   "CKV_AWS_338": {
     "severity": "medium",

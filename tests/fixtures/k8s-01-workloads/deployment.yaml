@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: prod
+  labels:
+    app: payments-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments-api
+  template:
+    metadata:
+      labels:
+        app: payments-api
+    spec:
+      containers:
+        - name: payments-api
+          image: registry.example.com/payments-api:latest
+          ports:
+            - containerPort: 8080
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+          env:
+            - name: DB_PASSWORD
+              value: "s3cr3t-prod-password"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-shell
+  namespace: prod
+spec:
+  hostNetwork: true
+  hostPID: true
+  containers:
+    - name: debug
+      image: busybox
+      command: ["sleep", "3600"]
+      securityContext:
+        privileged: true

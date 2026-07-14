@@ -72,9 +72,61 @@ from findings import UNMAPPED, is_quick_win, priority_score  # noqa: E402
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "informational", UNMAPPED)
 
-# The one tier that carries line numbers (parse_iac.py §1.1). Anything below it
-# means no line provenance, which means no SARIF and no patches.
+# The one tier that carries line numbers for Terraform (parse_iac.py §1.1).
+# Anything below it means no line provenance, which means no SARIF and no patches.
+# Kept as a public constant: other Terraform code (and tests) key on it.
 FULL_PARSE_TIER = "tfparse"
+
+# Phase 3 (WS-14): the same "full tier" idea, per format. Each format has one
+# parser tier that carries line numbers; a fall-back below it is a DEGRADED scan
+# (no line numbers -> no SARIF, no patches), exactly as for Terraform. The parse
+# result's own ``degraded`` / ``lineProvenance`` flags are the source of truth;
+# this map is only the fallback inference when those flags are absent (e.g. a
+# hand-built parse_result in a unit test).
+FULL_PARSE_TIERS = {
+    "terraform": {"tfparse"},
+    "cloudformation": {"cfn-lint"},
+    "kubernetes": {"ruamel"},
+    "docker-compose": {"ruamel"},
+    "docker_compose": {"ruamel"},
+    "compose": {"ruamel"},
+}
+
+# Where each format's line numbers come from — the "fix it, then re-scan" hint on
+# a degraded parse.
+PARSER_INSTALL_HINT = {
+    "terraform": "pip install tfparse",
+    "cloudformation": "pip install cfn-lint",
+    "kubernetes": "pip install ruamel.yaml",
+    "docker-compose": "pip install ruamel.yaml",
+    "docker_compose": "pip install ruamel.yaml",
+    "compose": "pip install ruamel.yaml",
+}
+
+# Formats for which Checkov's community edition has no (or effectively no) rule
+# coverage. A zero-finding scan on one of these is NOT a clean bill of health —
+# it is a coverage gap — and the report must say so rather than read as "clean".
+# Measured against checkov 3.2.500: there is no docker-compose framework; the
+# `dockerfile` framework only reads files literally named `Dockerfile`, and the
+# `secrets` framework does not fire on a compose file's `environment:` values.
+# So a Compose scan finds nothing deterministically; its value is the LLM layer.
+THIN_CHECKOV_COVERAGE = {
+    "docker-compose": (
+        "Checkov's community edition has no Docker Compose ruleset (no compose "
+        "framework; the `dockerfile` framework only reads files named `Dockerfile`; "
+        "the `secrets` framework does not fire on compose `environment:` values). "
+        "The deterministic layer therefore assessed nothing here — findings for "
+        "Compose come from the LLM layer, which this build does not run."
+    ),
+}
+THIN_CHECKOV_COVERAGE["docker_compose"] = THIN_CHECKOV_COVERAGE["docker-compose"]
+THIN_CHECKOV_COVERAGE["compose"] = THIN_CHECKOV_COVERAGE["docker-compose"]
+
+# Formats with no automated fixer in this build (WS-14: K8s/Compose are
+# findings-only). A finding on one of these is remediated by editing the manifest
+# by hand, guided by the rule's guideline — there is no diff, and the report must
+# not imply an automated Terraform patch exists.
+FINDINGS_ONLY_FORMATS = {"kubernetes", "docker-compose", "docker_compose", "compose"}
 
 
 # ---------------------------------------------------------------------------
@@ -159,34 +211,49 @@ def assess_degradation(
                 or "Checkov did not run.",
                 "impact": (
                     "The deterministic rule layer did not run. Coverage is unknown -- "
-                    "this scan is NOT evidence that your Terraform is clean."
+                    "this scan is NOT evidence that your infrastructure is clean."
                 ),
                 "fix": checkov_result.get("installHint") or "install checkov",
             }
         )
 
+    # Parser degradation is format-aware (WS-14). Every parse tier now reports its
+    # own ``degraded`` / ``lineProvenance`` honestly, so trust those; fall back to
+    # the per-format full-tier map only when a caller hand-built a parse_result
+    # without them (older unit tests pass ``{"parseTier": "hcl2", "degraded": True}``).
+    fmt = (parse_result.get("format") or "terraform").lower()
     tier = parse_result.get("parseTier")
-    if tier and tier != FULL_PARSE_TIER:
+    parse_error = parse_result.get("error")
+    line_provenance = parse_result.get("lineProvenance")
+    if line_provenance is None:
+        full_tiers = FULL_PARSE_TIERS.get(fmt, {FULL_PARSE_TIER})
+        line_provenance = bool(tier) and tier in full_tiers
+    # A parser that returned an error (e.g. "no manifests found", or a zero-resource
+    # parse that could not read the tree) is a loud degradation, not a clean scan.
+    parser_degraded = (
+        bool(parse_error)
+        or bool(parse_result.get("degraded"))
+        or (bool(tier) and not line_provenance)
+    )
+
+    if parser_degraded:
         reasons.append(
             {
                 "source": "parser",
                 "reason": parse_result.get("degradationReason")
-                or ("Parser fell back to the %s tier; tfparse was unavailable." % tier),
+                or (str(parse_error) if parse_error else None)
+                or (
+                    "Parser fell back to the %s tier; the line-number parser was "
+                    "unavailable." % tier
+                    if tier
+                    else "Parser degraded."
+                ),
                 "impact": (
                     "No line numbers. That means no SARIF output and no remediation "
                     "diffs -- every finding below is location-approximate and cannot "
                     "be patched automatically."
                 ),
-                "fix": "pip install tfparse",
-            }
-        )
-    elif parse_result.get("degraded") and not tier:
-        reasons.append(
-            {
-                "source": "parser",
-                "reason": parse_result.get("degradationReason") or "Parser degraded.",
-                "impact": "Parse coverage is incomplete; findings may be missing.",
-                "fix": "pip install tfparse",
+                "fix": PARSER_INSTALL_HINT.get(fmt, "pip install tfparse"),
             }
         )
 
@@ -195,9 +262,8 @@ def assess_degradation(
         "reasons": reasons,
         "parseTier": tier,
         "checkovDegraded": bool(checkov_result.get("degraded")),
-        "parserDegraded": bool(tier and tier != FULL_PARSE_TIER)
-        or bool(parse_result.get("degraded")),
-        "patchesPossible": tier == FULL_PARSE_TIER if tier else False,
+        "parserDegraded": parser_degraded,
+        "patchesPossible": bool(line_provenance) if tier else False,
     }
 
 
@@ -229,6 +295,14 @@ def verdict_line(report: Dict[str, Any]) -> str:
                 "infrastructure. This is NOT a clean result. See "
                 "'Degradation & scan integrity' below."
             )
+        if report.get("coverageNote"):
+            # Zero findings on a format Checkov cannot cover. NOT a clean result:
+            # nothing scanned it. Say so on the one line everyone reads.
+            return (
+                "0 findings -- but Checkov has no ruleset for this format, so nothing "
+                "assessed it. This is a COVERAGE GAP, not a clean result. See "
+                "'Degradation & scan integrity' below."
+            )
         return "0 findings. Clean against the rules that ran."
 
     parts = ", ".join("%d %s" % (n, sev) for sev, n in counts.items())
@@ -255,10 +329,24 @@ def build_report(
     compliance: Optional[str] = None,
     compliance_coverage: Optional[Dict[str, Any]] = None,
     fix_catalog_rule_ids: Optional[Sequence[str]] = None,
+    iac_format: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """The JSON report. ``render_markdown`` renders exactly this, nothing more."""
+    """The JSON report. ``render_markdown`` renders exactly this, nothing more.
+
+    ``iac_format`` (WS-14) names the IaC format scanned (``terraform`` by
+    default/None). It controls three things and nothing else, so Terraform and
+    CloudFormation output is byte-for-byte unchanged when it is ``None``:
+      * findings-only formats (K8s/Compose) render guidance, not a phantom diff;
+      * a format Checkov cannot cover (Compose) gets an honest coverage caveat
+        instead of a "clean" verdict on zero findings;
+      * each finding is stamped with ``iacFormat`` so the renderer can tell.
+    """
     patches = list(patches or [])
     findings = [dict(f) for f in merge_result.get("findings") or []]
+    fmt = (iac_format or "").lower() or None
+    if fmt:
+        for finding in findings:
+            finding.setdefault("iacFormat", fmt)
 
     # 1. complexity floor from the deterministic catalog, then
     # 2. classification -- a rule that produced a real patch on THIS tree is iac,
@@ -281,6 +369,18 @@ def build_report(
     quick_wins = [f for f in findings if f.get("isQuickWin")]
     non_iac = [f for f in findings if is_non_iac(f)]
 
+    # Coverage caveat: a zero-finding scan on a format Checkov cannot cover
+    # (Compose) must not read as clean. Only fires when the deterministic layer
+    # genuinely produced nothing AND was not itself degraded (that is a different,
+    # louder failure already handled above).
+    coverage_note = None
+    if (
+        fmt in THIN_CHECKOV_COVERAGE
+        and not findings
+        and not degradation["checkovDegraded"]
+    ):
+        coverage_note = THIN_CHECKOV_COVERAGE[fmt]
+
     summary = dict(merge_result.get("summary") or {})
     summary.update(
         {
@@ -294,6 +394,8 @@ def build_report(
 
     report: Dict[str, Any] = {
         "root": root,
+        "iacFormat": fmt,
+        "coverageNote": coverage_note,
         "summary": summary,
         "degradation": degradation,
         "findings": findings,
@@ -387,6 +489,23 @@ def _finding_block(finding: Dict[str, Any], index: int, *, with_diff: bool = Tru
     elif with_diff and finding.get("diff"):
         lines.append("")
         lines.extend(_fence(finding["diff"]))
+    elif with_diff and (finding.get("iacFormat") or "terraform") in FINDINGS_ONLY_FORMATS:
+        # WS-14: K8s/Compose are findings-only in this build — there is no
+        # automated fixer, so we do NOT imply one. Point at the file to edit and
+        # the rule's own guideline; never fabricate a diff.
+        loc = finding.get("location") or {}
+        line = (
+            "- **Findings-only for %s.** No automated fix in this build — remediate "
+            "by editing `%s` (`%s`) directly."
+            % (
+                finding.get("iacFormat"),
+                loc.get("file") or "?",
+                loc.get("resourceAddress") or "?",
+            )
+        )
+        if finding.get("guideline"):
+            line += " Guideline: %s" % finding["guideline"]
+        lines.append(line)
     elif with_diff:
         lines.append(
             "- No deterministic fix for this rule. It needs the remediation engineer "
@@ -610,11 +729,25 @@ def _render_degradation(report: Dict[str, Any]) -> List[str]:
     degradation = report["degradation"]
     suppressions = report.get("suppressionLog") or []
     injections = report.get("injectionAttempts") or []
+    coverage_note = report.get("coverageNote")
 
-    if not degradation["degraded"] and not suppressions and not injections:
+    if (
+        not degradation["degraded"]
+        and not suppressions
+        and not injections
+        and not coverage_note
+    ):
         return []
 
     lines = ["## Degradation & scan integrity", ""]
+
+    if coverage_note:
+        lines += [
+            "> # ⚠️ COVERAGE GAP — this format has no deterministic ruleset",
+            ">",
+            "> **0 findings here does NOT mean clean.** %s" % coverage_note,
+            "",
+        ]
 
     if degradation["degraded"]:
         lines += [
@@ -711,31 +844,154 @@ SECTION_ORDER = (
 # ---------------------------------------------------------------------------
 
 
-def scan(root: str, *, compliance: Optional[str] = None, use_fmt: bool = True) -> Dict[str, Any]:
+def _compose_file(root: str) -> str:
+    """Locate the Compose file. ``parse_docker_compose`` takes a FILE, not a dir."""
+    if os.path.isfile(root):
+        return root
+    import glob as _glob
+
+    for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"):
+        hit = _glob.glob(os.path.join(root, name))
+        if hit:
+            return hit[0]
+    # No compose file: hand the directory to the parser so it returns a loud error
+    # dict (its own degradation), rather than guessing a filename.
+    return root
+
+
+def detect_iac_format(root: str) -> Optional[str]:
+    """Best-effort format detection from a directory's contents.
+
+    The whole point is defense against the worst failure this tool has: scanning a
+    CloudFormation repo with the Terraform framework finds nothing and reports a
+    false-clean. If we can tell what the files ARE, we should not require the user
+    to also tell us. Returns None only when nothing recognizable is present (the
+    caller then falls back to terraform and the parser's own degradation fires).
+
+    Deliberately conservative: file presence + a light content sniff, no full
+    parse. `.tf` wins outright; among YAML we distinguish CFN
+    (AWSTemplateFormatVersion / a top-level Resources map) from k8s
+    (apiVersion + kind) from compose (a compose filename / a top-level services:).
+    """
+    import glob as _glob
+
+    if os.path.isfile(root):
+        low = root.lower()
+        if low.endswith(".tf"):
+            return "terraform"
+        if os.path.basename(low).startswith(("docker-compose", "compose")):
+            return "docker-compose"
+        # fall through to content sniff below on the single file
+        yaml_files = [root]
+    else:
+        if _glob.glob(os.path.join(root, "*.tf")) or _glob.glob(
+            os.path.join(root, "**", "*.tf"), recursive=True
+        ):
+            return "terraform"
+        for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"):
+            if _glob.glob(os.path.join(root, name)):
+                return "docker-compose"
+        yaml_files = [
+            p
+            for pat in ("*.yaml", "*.yml", "*.json", "*.template")
+            for p in _glob.glob(os.path.join(root, pat))
+            + _glob.glob(os.path.join(root, "**", pat), recursive=True)
+        ]
+
+    cfn = k8s = False
+    for path in yaml_files[:50]:  # bounded sniff; do not read a whole repo
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(4096)
+        except OSError:
+            continue
+        if "AWSTemplateFormatVersion" in head or "\nResources:" in head or head.startswith("Resources:"):
+            cfn = True
+        if "apiVersion:" in head and "kind:" in head:
+            k8s = True
+    if cfn and not k8s:
+        return "cloudformation"
+    if k8s and not cfn:
+        return "kubernetes"
+    if cfn and k8s:
+        # Ambiguous: prefer CFN (the format with a fixer) but this is a real
+        # ambiguity the caller may want to resolve explicitly.
+        return "cloudformation"
+    return None
+
+
+def parse_for_format(iac_format: str, root: str) -> Dict[str, Any]:
+    """Route to the right parser for the format (WS-14). Terraform is unchanged."""
+    from parse_iac import (
+        parse_cloudformation,
+        parse_docker_compose,
+        parse_kubernetes,
+        parse_terraform,
+    )
+
+    fmt = (iac_format or "terraform").lower()
+    if fmt == "terraform":
+        return parse_terraform(root)
+    if fmt == "cloudformation":
+        return parse_cloudformation(root)
+    if fmt == "kubernetes":
+        return parse_kubernetes(root)
+    if fmt in ("docker-compose", "docker_compose", "compose"):
+        return parse_docker_compose(_compose_file(root))
+    raise ValueError("unsupported IaC format: %r" % iac_format)
+
+
+def scan(
+    root: str,
+    *,
+    iac_format: Optional[str] = None,
+    compliance: Optional[str] = None,
+    use_fmt: bool = True,
+) -> Dict[str, Any]:
     """Run the whole deterministic pipeline over ``root`` and build the report.
 
     No LLM. Enrichment (WS-6) is layered on by passing ``enrichments=`` to
     ``merge`` and calling ``build_report`` directly.
+
+    ``iac_format`` (WS-14) selects the parser and the Checkov framework set.
+    Defaults to ``terraform``, so every existing caller is byte-for-byte
+    unchanged. Only Terraform has a deterministic fixer wired in here; K8s and
+    Compose are findings-only, and the report renders them as such (no phantom
+    diffs) — see ``build_report``.
     """
     from merge_findings import merge
-    from parse_iac import parse_terraform
     from patch_terraform import (
         FixCatalog,
         generate_file_patches,
         generate_security_patches,
         load_terraform_resources,
     )
-    from run_checkov import run_checkov
+    from run_checkov import frameworks_for_format, run_checkov
 
-    checkov_result = run_checkov(root)
-    parse_result = parse_terraform(root)
+    import contextlib
+
+    # Explicit format wins (every existing caller passes one, so they are
+    # unchanged). Otherwise detect from the directory's contents, and fall back to
+    # terraform only when nothing is recognizable -- the parser's own degradation
+    # then fires. This is the guard against scanning a CloudFormation repo with the
+    # Terraform framework and reporting a false-clean.
+    detected = detect_iac_format(root) if not iac_format else None
+    fmt = (iac_format or detected or "terraform").lower()
+
+    checkov_result = run_checkov(root, frameworks_for_format(fmt))
+    # The parsers print progress to stdout; keep it off OUR stdout so a
+    # `--format json`/`sarif` CLI run emits a clean machine document. Progress
+    # still shows, on stderr.
+    with contextlib.redirect_stdout(sys.stderr):
+        parse_result = parse_for_format(fmt, root)
     merge_result = merge(checkov_result.get("findings") or [], parse_result=parse_result)
 
     patches: List[Any] = []
     file_patches: List[Any] = []
-    # No line provenance -> no patching. Do not fabricate a diff against lines we
-    # do not have; the degradation notice says exactly this.
-    if parse_result.get("parseTier") == FULL_PARSE_TIER:
+    # Terraform only: it is the one format with a deterministic fix catalog wired
+    # in. And no line provenance -> no patching regardless. Do not fabricate a diff
+    # against lines we do not have; the degradation notice says exactly this.
+    if fmt == "terraform" and parse_result.get("parseTier") == FULL_PARSE_TIER:
         catalog = FixCatalog.load()
         resources, _ = load_terraform_resources(root)
         patches = generate_security_patches(
@@ -768,6 +1024,7 @@ def scan(root: str, *, compliance: Optional[str] = None, use_fmt: bool = True) -
         root=root,
         compliance=compliance,
         compliance_coverage=compliance_coverage,
+        iac_format=fmt,
     )
 
 
@@ -794,6 +1051,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(description="Render an IaC security scan report")
     parser.add_argument("root", help="directory to scan")
+    parser.add_argument(
+        "--iac-format",
+        dest="iac_format",
+        choices=("terraform", "cloudformation", "kubernetes", "docker-compose"),
+        default="terraform",
+        help="IaC format to scan (default: terraform). Selects the parser and the "
+        "Checkov framework set. K8s/Compose are findings-only (no auto-fix).",
+    )
     parser.add_argument("--format", choices=("markdown", "json", "sarif"), default="markdown")
     parser.add_argument("--out", help="write to this file instead of stdout")
     parser.add_argument(
@@ -811,7 +1076,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        report = scan(args.root, compliance=args.compliance, use_fmt=not args.no_fmt)
+        report = scan(
+            args.root,
+            iac_format=args.iac_format,
+            compliance=args.compliance,
+            use_fmt=not args.no_fmt,
+        )
     except Exception as exc:  # noqa: BLE001 -- any scan failure is exit 2, never 0
         sys.stderr.write("scan error: %s\n" % exc)
         return EXIT_ERROR
@@ -864,11 +1134,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 __all__ = [
     "SECTION_ORDER",
     "FULL_PARSE_TIER",
+    "FULL_PARSE_TIERS",
+    "THIN_CHECKOV_COVERAGE",
+    "FINDINGS_ONLY_FORMATS",
     "assess_degradation",
     "build_report",
     "derive_complexity",
     "diffs_by_finding",
     "is_mechanically_simple",
+    "parse_for_format",
     "render_markdown",
     "scan",
     "verdict_line",
