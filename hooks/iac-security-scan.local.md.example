@@ -1,0 +1,30 @@
+---
+# Copy this file to `.claude/iac-security-scan.local.md` in your project to turn
+# the terraform-apply security gate ON. It is OFF until this file exists with a
+# mode other than `off`. Keep it out of git (add `.claude/*.local.md` to
+# .gitignore) -- it is a per-developer local switch, not shared policy.
+
+# apply_gate: off | warn | ask | block
+#   off   -- disabled (the default; same as no file at all)
+#   warn  -- allow the apply but print a loud warning
+#   ask   -- ask you to confirm before applying
+#   block -- deny the apply until the finding is fixed or the gate is turned off
+apply_gate: block
+
+# Severity floor. Findings at or above this level gate the apply.
+# critical | high | medium | low
+apply_gate_severity: critical
+
+# Hard cap on scan time (seconds). If the scan takes longer it TIMES OUT and the
+# apply is ALLOWED (fail-open), never blocked.
+apply_gate_timeout: 120
+---
+
+# iac-security-scan apply-gate
+
+This project has the opt-in `terraform apply` security gate configured above.
+
+Remember: the gate **fails open**. If Checkov is missing, the scan errors, or it
+times out, your `terraform apply` proceeds -- the gate warns you loudly but will
+never wedge a deploy because the scanner broke. To turn it off, set
+`apply_gate: off` above (or export `IAC_SECURITY_SCAN_APPLY_GATE=off`).

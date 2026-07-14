@@ -73,6 +73,43 @@ Exit `0` clean · `1` findings at or above the `--severity` floor · `2` scan er
 
 SARIF annotates the PR diff inline, on the right lines.
 
+## Optional: gate `terraform apply` (off by default)
+
+There is an **opt-in** PreToolUse hook that scans the target directory before a
+`terraform apply` and warns, asks, or blocks when there are unfixed findings at or
+above a severity floor. It ships **disabled** and does two things to stay out of your
+way:
+
+- **Installing the plugin arms nothing.** The hook is not wired in `plugin.json`, and
+  there is no auto-loaded `hooks/hooks.json`. Nothing runs until *you* turn it on.
+- **It fails open.** If Checkov is missing, the scan errors, or it times out, your
+  `terraform apply` proceeds — you get a loud warning, never a wedged deploy. A security
+  tool that bricks `terraform apply` because it crashed is worse than one that lets a
+  bad apply through.
+
+**To turn it on** (two steps, both under your control):
+
+1. Register the hook. Copy the `PreToolUse` block from
+   `hooks/hooks.json.example` into your project's `.claude/settings.json`
+   (or copy the file to `hooks/hooks.json` inside the installed plugin).
+2. Create `.claude/iac-security-scan.local.md` in your project (template in
+   `hooks/iac-security-scan.local.md.example`):
+
+   ```markdown
+   ---
+   apply_gate: block           # off (default) | warn | ask | block
+   apply_gate_severity: critical
+   apply_gate_timeout: 120
+   ---
+   ```
+
+Even after step 1, the hook no-ops instantly until this flag file sets a mode other
+than `off`. Prefer an env var (handy in CI): `IAC_SECURITY_SCAN_APPLY_GATE=block`,
+`IAC_SECURITY_SCAN_APPLY_GATE_SEVERITY=high`. Env overrides the file.
+
+Add `.claude/*.local.md` to your `.gitignore` — the switch is per-developer, not shared
+policy. Hook changes require restarting Claude Code.
+
 ## License
 
 MIT
