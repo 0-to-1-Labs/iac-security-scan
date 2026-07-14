@@ -1,0 +1,218 @@
+{
+  "_meta": {
+    "source": "tests/fixtures/SECURITY_FLAWS.md — infrabot's planted-flaw catalogue, the answer key",
+    "scope": "The 25 Terraform flaws (TF-01..TF-05). CFN/CDK are Phase 3.",
+    "checkovPinned": "3.2.500",
+    "governance": [
+      "This file is checked-in, human-reviewable DATA. It is the grading key for detection recall.",
+      "A flaw is 'detected' only if a finding fires with one of `detectedBy` IN THE STATED FILE.",
+      "`detectedBy: []` means NO Checkov rule catches this flaw. Those are recorded, not hidden.",
+      "Never relax an entry to make recall look better. Recall is a number we report, not a number we manage."
+    ],
+    "deterministicRecall": "21/25 (84%). The 4 misses are listed below with the reason each one escapes.",
+    "whyTheMissesMatter": [
+      "On 3 of the 4 misses Checkov did not merely lack a rule -- it EVALUATED the flawed resource",
+      "and placed the check in passed_checks. It looked straight at the planted flaw and called it fine.",
+      "That is the argument for the hybrid design stated as a measurement: the deterministic layer is",
+      "not just incomplete, it is confidently wrong. These 4 are what the LLM layer is FOR."
+    ]
+  },
+
+  "tf-01-three-tier-webapp": [
+    {
+      "id": "TF-01-1",
+      "flaw": "RDS instance without storage encryption",
+      "severity": "HIGH",
+      "file": "rds.tf",
+      "detectedBy": ["CKV_AWS_16"]
+    },
+    {
+      "id": "TF-01-2",
+      "flaw": "EC2 instances without IMDSv2 enforcement",
+      "severity": "HIGH",
+      "file": "asg.tf",
+      "detectedBy": ["CKV_AWS_79"]
+    },
+    {
+      "id": "TF-01-3",
+      "flaw": "ALB access logging disabled",
+      "severity": "MEDIUM",
+      "file": "alb.tf",
+      "detectedBy": ["CKV_AWS_91"]
+    },
+    {
+      "id": "TF-01-4",
+      "flaw": "Security group allowing 0.0.0.0/0 on port 443",
+      "severity": "LOW",
+      "file": "security-groups.tf",
+      "detectedBy": [],
+      "missReason": "Checkov's open-ingress rules are PORT-SPECIFIC: CKV_AWS_24 (22), CKV_AWS_260 (80), CKV_AWS_25 (3389), CKV_AWS_277. None covers 443. All of them evaluated this security group and PASSED. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "TF-01-5",
+      "flaw": "RDS without deletion protection",
+      "severity": "MEDIUM",
+      "file": "rds.tf",
+      "detectedBy": ["CKV_AWS_293"]
+    }
+  ],
+
+  "tf-02-serverless-api": [
+    {
+      "id": "TF-02-1",
+      "flaw": "Lambda execution role with overly permissive DynamoDB policy (dynamodb:*)",
+      "severity": "HIGH",
+      "file": "iam.tf",
+      "detectedBy": [],
+      "missReason": "CKV_AWS_63 ('no IAM policy allows * as a statement's action') EVALUATED this policy and PASSED it. It matches only a bare '*'; a service-scoped wildcard like 'dynamodb:*' sails straight through. CKV_AWS_355 checks Resource:'*', and this policy scopes Resource to a real table ARN -- so the resource is tight and the ACTION is wide open, which is precisely the shape no Checkov rule catches. tf-02/iam.tf produces ZERO Checkov findings. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "TF-02-2",
+      "flaw": "DynamoDB without customer-managed KMS encryption",
+      "severity": "MEDIUM",
+      "file": "dynamodb.tf",
+      "detectedBy": ["CKV_AWS_119"]
+    },
+    {
+      "id": "TF-02-3",
+      "flaw": "API Gateway without access logging",
+      "severity": "MEDIUM",
+      "file": "api-gateway.tf",
+      "detectedBy": ["CKV_AWS_76"]
+    },
+    {
+      "id": "TF-02-4",
+      "flaw": "Cognito user pool without MFA enforcement",
+      "severity": "HIGH",
+      "file": "cognito.tf",
+      "detectedBy": [],
+      "missReason": "CKV_AWS_366 (Cognito MFA) EXISTS in checkov 3.2.500, EVALUATED this user pool, and placed the check in passed_checks. A true false negative: Checkov looked at the planted flaw and said it was fine. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "TF-02-5",
+      "flaw": "Lambda environment variables without KMS encryption",
+      "severity": "MEDIUM",
+      "file": "lambda.tf",
+      "detectedBy": ["CKV_AWS_173"]
+    }
+  ],
+
+  "tf-03-data-lake": [
+    {
+      "id": "TF-03-1",
+      "flaw": "S3 bucket using AES256 instead of aws:kms CMK",
+      "severity": "MEDIUM",
+      "file": "s3.tf",
+      "detectedBy": ["CKV_AWS_145"]
+    },
+    {
+      "id": "TF-03-2",
+      "flaw": "S3 bucket without access logging",
+      "severity": "MEDIUM",
+      "file": "s3.tf",
+      "detectedBy": ["CKV_AWS_18"]
+    },
+    {
+      "id": "TF-03-3",
+      "flaw": "Glue job with overly permissive IAM role (s3:* on all resources)",
+      "severity": "HIGH",
+      "file": "iam.tf",
+      "detectedBy": ["CKV_AWS_355", "CKV_AWS_288", "CKV_AWS_290"]
+    },
+    {
+      "id": "TF-03-4",
+      "flaw": "S3 raw zone bucket without versioning",
+      "severity": "MEDIUM",
+      "file": "s3.tf",
+      "detectedBy": ["CKV_AWS_21"]
+    },
+    {
+      "id": "TF-03-5",
+      "flaw": "Athena workgroup without query result encryption",
+      "severity": "MEDIUM",
+      "file": "athena.tf",
+      "detectedBy": ["CKV_AWS_159"]
+    }
+  ],
+
+  "tf-04-container-platform": [
+    {
+      "id": "TF-04-1",
+      "flaw": "ECR repository without image scanning on push",
+      "severity": "MEDIUM",
+      "file": "ecr.tf",
+      "detectedBy": ["CKV_AWS_163"]
+    },
+    {
+      "id": "TF-04-2",
+      "flaw": "ECS task definition without read-only root filesystem",
+      "severity": "MEDIUM",
+      "file": "services.tf",
+      "detectedBy": [],
+      "missReason": "CKV_AWS_336 (ECS containers limited to read-only root filesystem) EXISTS, EVALUATED this task definition, and placed the check in passed_checks. A true false negative. tf-04/services.tf produces ZERO Checkov findings despite carrying a planted flaw. Requires the LLM layer.",
+      "requiresLlmLayer": true
+    },
+    {
+      "id": "TF-04-3",
+      "flaw": "Task execution role with overly permissive Secrets Manager access",
+      "severity": "HIGH",
+      "file": "iam.tf",
+      "detectedBy": ["CKV_AWS_355", "CKV_AWS_288"]
+    },
+    {
+      "id": "TF-04-4",
+      "flaw": "ALB not configured with drop_invalid_header_fields",
+      "severity": "LOW",
+      "file": "alb.tf",
+      "detectedBy": ["CKV_AWS_131"]
+    },
+    {
+      "id": "TF-04-5",
+      "flaw": "CloudWatch log group without KMS encryption",
+      "severity": "MEDIUM",
+      "file": "cloudwatch.tf",
+      "detectedBy": ["CKV_AWS_158"]
+    }
+  ],
+
+  "tf-05-cicd-pipeline": [
+    {
+      "id": "TF-05-1",
+      "flaw": "CodeBuild project with privileged mode enabled unnecessarily",
+      "severity": "HIGH",
+      "file": "codebuild.tf",
+      "detectedBy": ["CKV_AWS_316"]
+    },
+    {
+      "id": "TF-05-2",
+      "flaw": "S3 artifact bucket without versioning",
+      "severity": "MEDIUM",
+      "file": "s3.tf",
+      "detectedBy": ["CKV_AWS_21"]
+    },
+    {
+      "id": "TF-05-3",
+      "flaw": "CodeBuild environment variables with plaintext secrets",
+      "severity": "CRITICAL",
+      "file": "codebuild.tf",
+      "detectedBy": ["CKV_AWS_147"]
+    },
+    {
+      "id": "TF-05-4",
+      "flaw": "Pipeline IAM role with overly broad permissions",
+      "severity": "HIGH",
+      "file": "iam.tf",
+      "detectedBy": ["CKV_AWS_355", "CKV_AWS_288"]
+    },
+    {
+      "id": "TF-05-5",
+      "flaw": "SNS topic without server-side encryption",
+      "severity": "MEDIUM",
+      "file": "sns.tf",
+      "detectedBy": ["CKV_AWS_26"]
+    }
+  ]
+}
