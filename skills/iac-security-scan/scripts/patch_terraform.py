@@ -1168,7 +1168,16 @@ def generate_security_patches(
 
             diff = create_unified_diff(file, original, patched)
             rule_ids = sorted({c.ruleId for c in changes})
-            severities = [f.get("severity") or "unmapped" for f in res_findings]
+
+            # A patch claims ONLY the findings it actually fixes -- never every
+            # finding that happens to sit on the same resource. Several rules fire
+            # on one address (CKV2_AWS_11 flow-logs and CKV2_AWS_12 default-SG both
+            # land on aws_vpc.main), and claiming a sibling means the report shows a
+            # user a diff under a finding it does not fix. They apply it, believe the
+            # finding is closed, and it is not. That is the failure this whole tool
+            # exists to prevent, so it may not live inside the tool.
+            fixed = [f for f in res_findings if (f.get("ruleId") or "") in set(rule_ids)]
+            severities = [f.get("severity") or "unmapped" for f in fixed]
             rule_auto = bool(rule_ids) and all(
                 (catalog.get(rid) or {}).get("autoApplicable", False) for rid in rule_ids
             )
@@ -1182,7 +1191,7 @@ def generate_security_patches(
                     address=resource.address,
                     changes=changes,
                     diff=diff,
-                    findingIds=sorted({f.get("id", "") for f in res_findings}),
+                    findingIds=sorted({f.get("id", "") for f in fixed}),
                     ruleIds=rule_ids,
                     severity=_highest_severity(severities),
                     autoApplicable=is_auto_applicable(changes, rule_auto),

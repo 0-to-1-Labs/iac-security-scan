@@ -762,3 +762,68 @@ class TestEmittedPatchSetApplies:
                 f"exported patch {os.path.basename(path)} does not apply:\n"
                 + proc.stderr
             )
+
+
+class TestAPatchClaimsOnlyWhatItFixes:
+    """Several Checkov rules fire on one resource address. CKV2_AWS_11 (VPC flow
+    logging) and CKV2_AWS_12 (default security group restricts all traffic) both
+    land on `aws_vpc.main` in tf-04.
+
+    Patches are built per-resource, so it is natural -- and wrong -- to attach every
+    finding on the resource to the one patch. The report joins diffs to findings by
+    findingId, so a patch that fixes CKV2_AWS_12 while claiming CKV2_AWS_11 renders a
+    default-security-group diff underneath a "flow logging is disabled" finding. The
+    user applies it, believes flow logging is fixed, and it is not.
+
+    A fix that looks applied and is not is the exact failure this tool exists to find
+    in other people's infrastructure. It does not get to live in the tool.
+    """
+
+    @pytest.mark.parametrize(
+        "fixture",
+        [
+            "tf-01-three-tier-webapp",
+            "tf-02-serverless-api",
+            "tf-03-data-lake",
+            "tf-04-container-platform",
+            "tf-05-cicd-pipeline",
+        ],
+    )
+    def test_no_patch_claims_a_finding_it_does_not_fix(self, fixture):
+        sys.path.insert(0, os.path.join(ROOT, "skills", "iac-security-scan", "scripts"))
+        import run_checkov
+
+        root = os.path.join(FIXTURES, fixture)
+        findings = run_checkov.run_checkov(root)["findings"]
+        by_id = {f["id"]: f["ruleId"] for f in findings}
+        resources, _ = pt.load_terraform_resources(root)
+        patches = pt.generate_security_patches(root, findings, resources=resources, use_fmt=False)
+
+        for patch in patches:
+            fixes = set(patch.ruleIds or [])
+            claims = {by_id.get(fid) for fid in (patch.findingIds or [])}
+            assert claims <= fixes, (
+                f"{fixture}: a patch fixing {sorted(fixes)} claims findings for "
+                f"{sorted(claims - fixes)} -- those findings would render this diff "
+                f"and appear fixed when they are not"
+            )
+
+    def test_the_vpc_case_specifically(self):
+        """The concrete instance, pinned so it cannot silently return."""
+        sys.path.insert(0, os.path.join(ROOT, "skills", "iac-security-scan", "scripts"))
+        import run_checkov
+
+        root = os.path.join(FIXTURES, "tf-04-container-platform")
+        findings = run_checkov.run_checkov(root)["findings"]
+        flow_log = [f for f in findings if f["ruleId"] == "CKV2_AWS_11"]
+        assert flow_log, "tf-04 must still plant the VPC flow-logging finding"
+
+        resources, _ = pt.load_terraform_resources(root)
+        patches = pt.generate_security_patches(root, findings, resources=resources, use_fmt=False)
+
+        flow_log_ids = {f["id"] for f in flow_log}
+        for patch in patches:
+            if "CKV2_AWS_11" not in (patch.ruleIds or []):
+                assert not (flow_log_ids & set(patch.findingIds or [])), (
+                    "a patch that does not fix CKV2_AWS_11 is claiming its finding"
+                )
