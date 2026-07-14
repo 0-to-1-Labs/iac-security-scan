@@ -1,0 +1,1027 @@
+{
+  "_meta": {
+    "purpose": "The deterministic fix catalog (WS-5). Rule ID -> concrete Terraform change. No LLM in this path.",
+    "governance": "Static, checked-in, human-reviewed data -- the same rule as rule-severity.json and control-map.json. The model never writes a fix rule at runtime.",
+    "prioritization": "Strictly by measured corpus frequency across tests/fixtures/tf-0*. 30 rules = 119/158 findings (75%) of the corpus, and 119/139 (86%) of everything that is deterministically fixable at all.",
+    "notDeterministicallyFixable": {
+      "CKV_AWS_355": "IAM wildcard resource. There is no correct set of ARNs to narrow to without knowing intent -- routed to the LLM path (WS-6). Never auto-applicable either way.",
+      "CKV_AWS_290": "Same. IAM write access without constraints.",
+      "CKV_AWS_288": "Same. IAM data exfiltration.",
+      "CKV_AWS_289": "Same. IAM permissions management.",
+      "CKV_AWS_287": "Same. IAM credentials exposure.",
+      "CKV_AWS_117": "Lambda in a VPC. Choosing subnets/SGs is an architecture decision; synthesising an empty VPC would cut the function off from its dependencies. Routed to the LLM path."
+    },
+    "autoApplicable": "autoApplicable=true is the catalog's human-reviewed opinion, and it is only ever a NOMINATION. patch_terraform.auto_apply_blocker() can veto it and there is no path by which a never-list category becomes auto-applicable. See SPEC §6.3."
+  },
+
+  "dataSources": {
+    "caller_identity": {
+      "address": "data.aws_caller_identity.current",
+      "description": "account id, needed for the KMS key policy's root statement",
+      "template": ["data \"aws_caller_identity\" \"current\" {}"]
+    },
+    "region": {
+      "address": "data.aws_region.current",
+      "description": "region, needed for the CloudWatch Logs service principal",
+      "template": ["data \"aws_region\" \"current\" {}"]
+    }
+  },
+
+  "sharedResources": {
+    "cmk": {
+      "ref": "aws_kms_key.iac_scan_cmk",
+      "description": "customer-managed KMS key (added by iac-security-scan)",
+      "createsResourceTypes": ["aws_kms_key"],
+      "template": [
+        "# Added by iac-security-scan: customer-managed key for encryption-at-rest fixes.",
+        "# Review the key policy and key administrators before applying.",
+        "resource \"aws_kms_key\" \"iac_scan_cmk\" {",
+        "  description             = \"Customer-managed key added by iac-security-scan\"",
+        "  enable_key_rotation     = true",
+        "  deletion_window_in_days = 30",
+        "}"
+      ]
+    },
+
+    "logs_kms_key": {
+      "ref": "aws_kms_key.iac_scan_logs",
+      "description": "KMS key for CloudWatch Logs, with the service-principal key policy the service requires",
+      "createsResourceTypes": ["aws_kms_key"],
+      "dataSources": ["caller_identity", "region"],
+      "template": [
+        "# Added by iac-security-scan: CloudWatch Logs cannot use a CMK unless the key",
+        "# policy grants the logs.<region>.amazonaws.com service principal. A key without",
+        "# that statement makes every log group fail to create. REVIEW THIS KEY POLICY.",
+        "resource \"aws_kms_key\" \"iac_scan_logs\" {",
+        "  description             = \"CloudWatch Logs CMK added by iac-security-scan\"",
+        "  enable_key_rotation     = true",
+        "  deletion_window_in_days = 30",
+        "",
+        "  policy = jsonencode({",
+        "    Version = \"2012-10-17\"",
+        "    Statement = [",
+        "      {",
+        "        Sid       = \"EnableAccountRoot\"",
+        "        Effect    = \"Allow\"",
+        "        Principal = { AWS = \"arn:aws:iam::${data.aws_caller_identity.current.account_id}:root\" }",
+        "        Action    = \"kms:*\"",
+        "        Resource  = \"*\"",
+        "      },",
+        "      {",
+        "        Sid       = \"AllowCloudWatchLogs\"",
+        "        Effect    = \"Allow\"",
+        "        Principal = { Service = \"logs.${data.aws_region.current.name}.amazonaws.com\" }",
+        "        Action = [",
+        "          \"kms:Encrypt*\",",
+        "          \"kms:Decrypt*\",",
+        "          \"kms:ReEncrypt*\",",
+        "          \"kms:GenerateDataKey*\",",
+        "          \"kms:Describe*\",",
+        "        ]",
+        "        Resource = \"*\"",
+        "      },",
+        "    ]",
+        "  })",
+        "}"
+      ]
+    },
+
+    "access_log_bucket": {
+      "ref": "aws_s3_bucket.iac_scan_access_logs",
+      "description": "destination bucket for S3 server access logs",
+      "createsResourceTypes": ["aws_s3_bucket"],
+      "template": [
+        "# Added by iac-security-scan: destination for S3 server access logs.",
+        "# If you already have a central log bucket, point target_bucket at it and delete this.",
+        "resource \"aws_s3_bucket\" \"iac_scan_access_logs\" {",
+        "  bucket_prefix = \"iac-scan-access-logs-\"",
+        "}",
+        "",
+        "resource \"aws_s3_bucket_versioning\" \"iac_scan_access_logs\" {",
+        "  bucket = aws_s3_bucket.iac_scan_access_logs.id",
+        "",
+        "  versioning_configuration {",
+        "    status = \"Enabled\"",
+        "  }",
+        "}",
+        "",
+        "resource \"aws_s3_bucket_public_access_block\" \"iac_scan_access_logs\" {",
+        "  bucket = aws_s3_bucket.iac_scan_access_logs.id",
+        "",
+        "  block_public_acls       = true",
+        "  block_public_policy     = true",
+        "  ignore_public_acls      = true",
+        "  restrict_public_buckets = true",
+        "}",
+        "",
+        "resource \"aws_s3_bucket_logging\" \"iac_scan_access_logs\" {",
+        "  bucket        = aws_s3_bucket.iac_scan_access_logs.id",
+        "  target_bucket = aws_s3_bucket.iac_scan_access_logs.id",
+        "  target_prefix = \"self/\"",
+        "}",
+        "",
+        "resource \"aws_s3_bucket_notification\" \"iac_scan_access_logs\" {",
+        "  bucket      = aws_s3_bucket.iac_scan_access_logs.id",
+        "  eventbridge = true",
+        "}"
+      ]
+    },
+
+    "replica_bucket": {
+      "ref": "aws_s3_bucket.iac_scan_replica",
+      "description": "replication destination bucket (must be in a different region for true CRR -- add a provider alias)",
+      "createsResourceTypes": ["aws_s3_bucket"],
+      "template": [
+        "# Added by iac-security-scan: replication destination.",
+        "# NOTE: for genuine CROSS-REGION replication this bucket must live in another",
+        "# region. Add an aliased provider and set `provider = aws.replica` here.",
+        "resource \"aws_s3_bucket\" \"iac_scan_replica\" {",
+        "  bucket_prefix = \"iac-scan-replica-\"",
+        "}",
+        "",
+        "resource \"aws_s3_bucket_versioning\" \"iac_scan_replica\" {",
+        "  bucket = aws_s3_bucket.iac_scan_replica.id",
+        "",
+        "  versioning_configuration {",
+        "    status = \"Enabled\"",
+        "  }",
+        "}"
+      ]
+    },
+
+    "replication_role": {
+      "ref": "aws_iam_role.iac_scan_replication",
+      "description": "IAM role assumed by S3 to perform replication",
+      "createsResourceTypes": ["aws_iam_role", "aws_iam_role_policy"],
+      "template": [
+        "# Added by iac-security-scan: S3 replication service role. REVIEW BEFORE APPLYING.",
+        "resource \"aws_iam_role\" \"iac_scan_replication\" {",
+        "  name_prefix = \"iac-scan-replication-\"",
+        "",
+        "  assume_role_policy = jsonencode({",
+        "    Version = \"2012-10-17\"",
+        "    Statement = [{",
+        "      Effect    = \"Allow\"",
+        "      Principal = { Service = \"s3.amazonaws.com\" }",
+        "      Action    = \"sts:AssumeRole\"",
+        "    }]",
+        "  })",
+        "}"
+      ]
+    },
+
+    "glue_security_configuration": {
+      "ref": "aws_glue_security_configuration.iac_scan_glue",
+      "description": "Glue security configuration (SSE-KMS for S3, CloudWatch and job bookmarks)",
+      "createsResourceTypes": ["aws_glue_security_configuration"],
+      "template": [
+        "# Added by iac-security-scan: Glue security configuration.",
+        "resource \"aws_glue_security_configuration\" \"iac_scan_glue\" {",
+        "  name = \"iac-security-scan-glue\"",
+        "",
+        "  encryption_configuration {",
+        "    cloudwatch_encryption {",
+        "      cloudwatch_encryption_mode = \"SSE-KMS\"",
+        "      kms_key_arn                = aws_kms_key.iac_scan_cmk.arn",
+        "    }",
+        "",
+        "    job_bookmarks_encryption {",
+        "      job_bookmarks_encryption_mode = \"CSE-KMS\"",
+        "      kms_key_arn                   = aws_kms_key.iac_scan_cmk.arn",
+        "    }",
+        "",
+        "    s3_encryption {",
+        "      s3_encryption_mode = \"SSE-KMS\"",
+        "      kms_key_arn        = aws_kms_key.iac_scan_cmk.arn",
+        "    }",
+        "  }",
+        "}"
+      ]
+    },
+
+    "lambda_dlq": {
+      "ref": "aws_sqs_queue.iac_scan_lambda_dlq",
+      "description": "SQS dead-letter queue for Lambda async failures",
+      "createsResourceTypes": ["aws_sqs_queue"],
+      "template": [
+        "# Added by iac-security-scan: Lambda dead-letter queue.",
+        "# The function's execution role also needs sqs:SendMessage on this queue.",
+        "resource \"aws_sqs_queue\" \"iac_scan_lambda_dlq\" {",
+        "  name_prefix       = \"iac-scan-lambda-dlq-\"",
+        "  kms_master_key_id = \"alias/aws/sqs\"",
+        "}"
+      ]
+    },
+
+    "lambda_code_signing": {
+      "ref": "aws_lambda_code_signing_config.iac_scan_lambda",
+      "description": "Lambda code-signing configuration + signing profile",
+      "createsResourceTypes": ["aws_signer_signing_profile", "aws_lambda_code_signing_config"],
+      "template": [
+        "# Added by iac-security-scan: Lambda code signing.",
+        "# Deployments will be REJECTED unless artifacts are signed by this profile.",
+        "resource \"aws_signer_signing_profile\" \"iac_scan_lambda\" {",
+        "  platform_id = \"AWSLambda-SHA384-ECDSA\"",
+        "  name_prefix = \"iac_scan_lambda_\"",
+        "}",
+        "",
+        "resource \"aws_lambda_code_signing_config\" \"iac_scan_lambda\" {",
+        "  description = \"Code signing config added by iac-security-scan\"",
+        "",
+        "  allowed_publishers {",
+        "    signing_profile_version_arns = [aws_signer_signing_profile.iac_scan_lambda.version_arn]",
+        "  }",
+        "",
+        "  policies {",
+        "    untrusted_artifact_on_deployment = \"Enforce\"",
+        "  }",
+        "}"
+      ]
+    },
+
+    "alb_waf": {
+      "ref": "aws_wafv2_web_acl.iac_scan_alb",
+      "description": "regional WAFv2 web ACL with the AWS common rule set",
+      "createsResourceTypes": ["aws_wafv2_web_acl"],
+      "template": [
+        "# Added by iac-security-scan: WAFv2 for the public ALB.",
+        "# AWSManagedRulesCommonRuleSet can block legitimate traffic. Run it in count mode first.",
+        "resource \"aws_wafv2_web_acl\" \"iac_scan_alb\" {",
+        "  name  = \"iac-security-scan-alb\"",
+        "  scope = \"REGIONAL\"",
+        "",
+        "  default_action {",
+        "    allow {}",
+        "  }",
+        "",
+        "  rule {",
+        "    name     = \"AWSManagedRulesCommonRuleSet\"",
+        "    priority = 1",
+        "",
+        "    override_action {",
+        "      none {}",
+        "    }",
+        "",
+        "    statement {",
+        "      managed_rule_group_statement {",
+        "        name        = \"AWSManagedRulesCommonRuleSet\"",
+        "        vendor_name = \"AWS\"",
+        "      }",
+        "    }",
+        "",
+        "    visibility_config {",
+        "      cloudwatch_metrics_enabled = true",
+        "      metric_name                = \"iac-scan-common-rules\"",
+        "      sampled_requests_enabled   = true",
+        "    }",
+        "  }",
+        "",
+        "  visibility_config {",
+        "    cloudwatch_metrics_enabled = true",
+        "    metric_name                = \"iac-scan-alb\"",
+        "    sampled_requests_enabled   = true",
+        "  }",
+        "}"
+      ]
+    },
+
+    "trusted_ingress_cidr": {
+      "ref": "var.iac_scan_trusted_ingress_cidr",
+      "description": "the CIDR an internet-open security-group rule is narrowed to -- SET THIS",
+      "createsResourceTypes": [],
+      "template": [
+        "# Added by iac-security-scan: an internet-open ingress rule was narrowed to this",
+        "# variable. THE DEFAULT IS A PLACEHOLDER. Set it to your real trusted range before",
+        "# applying, or you will cut off legitimate traffic.",
+        "variable \"iac_scan_trusted_ingress_cidr\" {",
+        "  description = \"Trusted CIDR permitted to reach this security group\"",
+        "  type        = string",
+        "  default     = \"10.0.0.0/8\"",
+        "}"
+      ]
+    }
+  },
+
+  "rules": {
+    "CKV_AWS_338": {
+      "title": "CloudWatch log group retains logs for at least 1 year",
+      "corpusCount": 11,
+      "category": "logging",
+      "autoApplicable": true,
+      "rationale": "Single attribute, additive, no access impact. When the existing value is an expression (var.log_retention_days) this degrades to a modify and the engine forces it diff-only -- overriding a deliberate parameterisation is not unambiguous.",
+      "resourceTypes": ["aws_cloudwatch_log_group"],
+      "changes": [
+        {
+          "kind": "attribute",
+          "name": "retention_in_days",
+          "value": "365",
+          "description": "retain CloudWatch logs for 365 days"
+        }
+      ]
+    },
+
+    "CKV_AWS_158": {
+      "title": "CloudWatch log group is encrypted by KMS",
+      "corpusCount": 11,
+      "category": "kms-key-policy",
+      "autoApplicable": false,
+      "rationale": "Creates a KMS key AND its key policy. Category 4 on the never-auto-apply list: a wrong key policy bricks log delivery, and re-keying an existing log group is not reversible in place.",
+      "resourceTypes": ["aws_cloudwatch_log_group"],
+      "changes": [
+        { "kind": "shared", "id": "logs_kms_key" },
+        {
+          "kind": "attribute",
+          "name": "kms_key_id",
+          "value": "${shared.logs_kms_key.ref}.arn",
+          "description": "encrypt the log group with a customer-managed KMS key"
+        }
+      ]
+    },
+
+    "CKV2_AWS_62": {
+      "title": "S3 bucket has event notifications enabled",
+      "corpusCount": 6,
+      "category": "logging",
+      "autoApplicable": true,
+      "rationale": "A single additive companion that routes bucket events to EventBridge. It grants nothing, denies nothing, and cannot break access.",
+      "resourceTypes": ["aws_s3_bucket"],
+      "changes": [
+        {
+          "kind": "companion",
+          "address": "aws_s3_bucket_notification.${name}_notification",
+          "createsResourceTypes": ["aws_s3_bucket_notification"],
+          "skipIfLinked": {
+            "resourceTypes": ["aws_s3_bucket_notification"],
+            "attribute": "bucket"
+          },
+          "description": "send S3 events for ${name} to EventBridge",
+          "template": [
+            "resource \"aws_s3_bucket_notification\" \"${name}_notification\" {",
+            "  bucket      = ${address}.id",
+            "  eventbridge = true",
+            "}"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_18": {
+      "title": "S3 bucket has access logging enabled",
+      "corpusCount": 6,
+      "category": "logging",
+      "autoApplicable": false,
+      "rationale": "Creates a new destination bucket. Which bucket receives access logs is an operational decision (most orgs have a central one), so a human picks.",
+      "resourceTypes": ["aws_s3_bucket"],
+      "changes": [
+        { "kind": "shared", "id": "access_log_bucket" },
+        {
+          "kind": "companion",
+          "address": "aws_s3_bucket_logging.${name}_logging",
+          "createsResourceTypes": ["aws_s3_bucket_logging"],
+          "skipIfLinked": {
+            "resourceTypes": ["aws_s3_bucket_logging"],
+            "attribute": "bucket"
+          },
+          "description": "enable S3 server access logging for ${name}",
+          "template": [
+            "resource \"aws_s3_bucket_logging\" \"${name}_logging\" {",
+            "  bucket        = ${address}.id",
+            "  target_bucket = ${shared.access_log_bucket.ref}.id",
+            "  target_prefix = \"s3-access-logs/${name}/\"",
+            "}"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_144": {
+      "title": "S3 bucket has cross-region replication enabled",
+      "corpusCount": 6,
+      "category": "resilience",
+      "autoApplicable": false,
+      "rationale": "Creates a destination bucket AND an IAM role. Real cross-region replication also needs an aliased provider in a second region, which only a human can decide. Diff-only, always.",
+      "resourceTypes": ["aws_s3_bucket"],
+      "changes": [
+        { "kind": "shared", "id": "replica_bucket" },
+        { "kind": "shared", "id": "replication_role" },
+        {
+          "kind": "companion",
+          "address": "aws_s3_bucket_versioning.${name}_versioning",
+          "createsResourceTypes": ["aws_s3_bucket_versioning"],
+          "skipIfLinked": {
+            "resourceTypes": ["aws_s3_bucket_versioning"],
+            "attribute": "bucket"
+          },
+          "description": "enable versioning on ${name} (a hard prerequisite for replication)",
+          "template": [
+            "resource \"aws_s3_bucket_versioning\" \"${name}_versioning\" {",
+            "  bucket = ${address}.id",
+            "",
+            "  versioning_configuration {",
+            "    status = \"Enabled\"",
+            "  }",
+            "}"
+          ]
+        },
+        {
+          "kind": "companion",
+          "address": "aws_s3_bucket_replication_configuration.${name}_replication",
+          "createsResourceTypes": ["aws_s3_bucket_replication_configuration"],
+          "description": "replicate ${name} to a second bucket",
+          "template": [
+            "resource \"aws_s3_bucket_replication_configuration\" \"${name}_replication\" {",
+            "  bucket = ${address}.id",
+            "  role   = aws_iam_role.iac_scan_replication.arn",
+            "",
+            "  rule {",
+            "    id     = \"iac-security-scan-replicate-all\"",
+            "    status = \"Enabled\"",
+            "",
+            "    destination {",
+            "      bucket        = aws_s3_bucket.iac_scan_replica.arn",
+            "      storage_class = \"STANDARD\"",
+            "    }",
+            "  }",
+            "}"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_130": {
+      "title": "VPC subnets do not assign a public IP by default",
+      "corpusCount": 5,
+      "category": "network",
+      "autoApplicable": false,
+      "rationale": "Access-affecting. Instances launched into a public subnet stop getting public IPs; anything reachable that way goes dark. A human decides whether the subnet is meant to be public.",
+      "resourceTypes": ["aws_subnet"],
+      "changes": [
+        {
+          "kind": "attribute",
+          "name": "map_public_ip_on_launch",
+          "value": "false",
+          "description": "stop auto-assigning public IPs in this subnet"
+        }
+      ]
+    },
+
+    "CKV_AWS_116": {
+      "title": "Lambda function has a dead-letter queue",
+      "corpusCount": 5,
+      "category": "resilience",
+      "autoApplicable": false,
+      "rationale": "Creates an SQS queue and requires an execution-role grant the patch does not add. Diff-only so the reviewer sees the missing IAM half.",
+      "resourceTypes": ["aws_lambda_function"],
+      "changes": [
+        { "kind": "shared", "id": "lambda_dlq" },
+        {
+          "kind": "block",
+          "name": "dead_letter_config",
+          "description": "send failed async invocations of ${name} to a DLQ",
+          "body": ["  target_arn = ${shared.lambda_dlq.ref}.arn"]
+        }
+      ]
+    },
+
+    "CKV_AWS_173": {
+      "title": "Lambda environment variables are encrypted with a CMK",
+      "corpusCount": 5,
+      "category": "kms-key-policy",
+      "autoApplicable": false,
+      "rationale": "Creates a KMS key. Category 4 on the never-auto-apply list.",
+      "resourceTypes": ["aws_lambda_function"],
+      "changes": [
+        { "kind": "shared", "id": "cmk" },
+        {
+          "kind": "attribute",
+          "name": "kms_key_arn",
+          "value": "${shared.cmk.ref}.arn",
+          "description": "encrypt ${name}'s environment variables with a CMK"
+        }
+      ]
+    },
+
+    "CKV_AWS_272": {
+      "title": "Lambda function validates code signing",
+      "corpusCount": 5,
+      "category": "supply-chain",
+      "autoApplicable": false,
+      "rationale": "Enforcing code signing REJECTS every unsigned deployment. Turning that on without a signing pipeline in place breaks the next deploy.",
+      "resourceTypes": ["aws_lambda_function"],
+      "changes": [
+        { "kind": "shared", "id": "lambda_code_signing" },
+        {
+          "kind": "attribute",
+          "name": "code_signing_config_arn",
+          "value": "${shared.lambda_code_signing.ref}.arn",
+          "description": "require signed artifacts for ${name}"
+        }
+      ]
+    },
+
+    "CKV_AWS_115": {
+      "title": "Lambda function has a concurrent-execution limit",
+      "corpusCount": 5,
+      "category": "availability",
+      "autoApplicable": false,
+      "rationale": "The correct reservation is workload-specific. A guessed limit throttles production traffic, so this is not semantically unambiguous and never auto-applies.",
+      "resourceTypes": ["aws_lambda_function"],
+      "changes": [
+        {
+          "kind": "attribute",
+          "name": "reserved_concurrent_executions",
+          "value": "100",
+          "description": "cap concurrency for ${name} (TUNE THIS -- 100 is a placeholder)"
+        }
+      ]
+    },
+
+    "CKV2_AWS_53": {
+      "title": "API Gateway request is validated",
+      "corpusCount": 5,
+      "category": "input-validation",
+      "autoApplicable": false,
+      "rationale": "Turning on request validation starts rejecting requests that previously succeeded. Behaviour-changing, so a human confirms.",
+      "resourceTypes": ["aws_api_gateway_method"],
+      "changes": [
+        {
+          "kind": "companion",
+          "address": "aws_api_gateway_request_validator.${name}_validator",
+          "createsResourceTypes": ["aws_api_gateway_request_validator"],
+          "rawAttributes": ["rest_api_id"],
+          "description": "add a request validator for ${name}",
+          "template": [
+            "resource \"aws_api_gateway_request_validator\" \"${name}_validator\" {",
+            "  name                        = \"${name}-request-validator\"",
+            "  rest_api_id                 = ${raw.rest_api_id}",
+            "  validate_request_body       = true",
+            "  validate_request_parameters = true",
+            "}"
+          ]
+        },
+        {
+          "kind": "attribute",
+          "name": "request_validator_id",
+          "value": "aws_api_gateway_request_validator.${name}_validator.id",
+          "description": "validate requests to ${name}"
+        }
+      ]
+    },
+
+    "CKV_AWS_260": {
+      "title": "Security group does not allow ingress from 0.0.0.0/0 to port 80",
+      "corpusCount": 4,
+      "category": "security-group-cidr",
+      "autoApplicable": false,
+      "rationale": "CATEGORY 1 ON THE HARD NEVER-AUTO-APPLY LIST. Narrowing an SG CIDR is how you lock an operator (or every customer) out of production. The diff is generated; a human applies it, having first set the variable to a range that is actually correct.",
+      "resourceTypes": ["aws_vpc_security_group_ingress_rule"],
+      "changes": [
+        { "kind": "shared", "id": "trusted_ingress_cidr" },
+        {
+          "kind": "attribute",
+          "name": "cidr_ipv4",
+          "value": "var.iac_scan_trusted_ingress_cidr",
+          "description": "narrow ${name} from the whole internet to a trusted CIDR"
+        }
+      ]
+    },
+
+    "CKV_AWS_195": {
+      "title": "Glue component has a security configuration",
+      "corpusCount": 4,
+      "category": "kms-key-policy",
+      "autoApplicable": false,
+      "rationale": "Creates a KMS key. Category 4 on the never-auto-apply list.",
+      "resourceTypes": ["aws_glue_crawler", "aws_glue_job"],
+      "changes": [
+        { "kind": "shared", "id": "cmk" },
+        { "kind": "shared", "id": "glue_security_configuration" },
+        {
+          "kind": "attribute",
+          "name": "security_configuration",
+          "value": "${shared.glue_security_configuration.ref}.name",
+          "description": "attach an encrypting security configuration to ${name}"
+        }
+      ]
+    },
+
+    "CKV_AWS_300": {
+      "title": "S3 lifecycle configuration aborts failed multipart uploads",
+      "corpusCount": 4,
+      "category": "hygiene",
+      "autoApplicable": true,
+      "rationale": "Additive lifecycle rule. Deletes nothing a caller can see -- only incomplete multipart uploads, which are unreadable by definition. No access impact.",
+      "resourceTypes": ["aws_s3_bucket_lifecycle_configuration"],
+      "changes": [
+        {
+          "kind": "block",
+          "name": "rule",
+          "skipIfPresent": false,
+          "description": "abort incomplete multipart uploads after 7 days",
+          "body": [
+            "  id     = \"iac-security-scan-abort-incomplete-multipart-upload\"",
+            "  status = \"Enabled\"",
+            "",
+            "  filter {}",
+            "",
+            "  abort_incomplete_multipart_upload {",
+            "    days_after_initiation = 7",
+            "  }"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_145": {
+      "title": "S3 bucket is encrypted with KMS by default",
+      "corpusCount": 3,
+      "category": "kms-key-policy",
+      "autoApplicable": false,
+      "rationale": "Creates a KMS key. Category 4 on the never-auto-apply list. Also re-keys an existing bucket: old objects stay under the old key and every reader needs kms:Decrypt.",
+      "resourceTypes": ["aws_s3_bucket"],
+      "changes": [
+        { "kind": "shared", "id": "cmk" },
+        {
+          "kind": "replace_block",
+          "name": "rule",
+          "linkTo": {
+            "resourceTypes": ["aws_s3_bucket_server_side_encryption_configuration"],
+            "attribute": "bucket"
+          },
+          "description": "switch ${name} from AES256 to a customer-managed KMS key",
+          "body": [
+            "  apply_server_side_encryption_by_default {",
+            "    kms_master_key_id = aws_kms_key.iac_scan_cmk.arn",
+            "    sse_algorithm     = \"aws:kms\"",
+            "  }",
+            "",
+            "  bucket_key_enabled = true"
+          ]
+        },
+        {
+          "kind": "companion",
+          "address": "aws_s3_bucket_server_side_encryption_configuration.${name}_sse",
+          "createsResourceTypes": ["aws_s3_bucket_server_side_encryption_configuration"],
+          "skipIfLinked": {
+            "resourceTypes": ["aws_s3_bucket_server_side_encryption_configuration"],
+            "attribute": "bucket"
+          },
+          "description": "add KMS default encryption to ${name}",
+          "template": [
+            "resource \"aws_s3_bucket_server_side_encryption_configuration\" \"${name}_sse\" {",
+            "  bucket = ${address}.id",
+            "",
+            "  rule {",
+            "    apply_server_side_encryption_by_default {",
+            "      kms_master_key_id = aws_kms_key.iac_scan_cmk.arn",
+            "      sse_algorithm     = \"aws:kms\"",
+            "    }",
+            "",
+            "    bucket_key_enabled = true",
+            "  }",
+            "}"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_21": {
+      "title": "S3 bucket has versioning enabled",
+      "corpusCount": 3,
+      "category": "data-protection",
+      "autoApplicable": true,
+      "rationale": "SPEC §6.3 names versioning as an auto-apply example. Additive, unambiguous, cannot break access. If a versioning resource already exists and is Suspended, the fix becomes a modify and the engine forces it diff-only.",
+      "resourceTypes": ["aws_s3_bucket"],
+      "changes": [
+        {
+          "kind": "companion",
+          "address": "aws_s3_bucket_versioning.${name}_versioning",
+          "createsResourceTypes": ["aws_s3_bucket_versioning"],
+          "skipIfLinked": {
+            "resourceTypes": ["aws_s3_bucket_versioning"],
+            "attribute": "bucket"
+          },
+          "description": "enable versioning on ${name}",
+          "template": [
+            "resource \"aws_s3_bucket_versioning\" \"${name}_versioning\" {",
+            "  bucket = ${address}.id",
+            "",
+            "  versioning_configuration {",
+            "    status = \"Enabled\"",
+            "  }",
+            "}"
+          ]
+        },
+        {
+          "kind": "replace_block",
+          "name": "versioning_configuration",
+          "linkTo": {
+            "resourceTypes": ["aws_s3_bucket_versioning"],
+            "attribute": "bucket"
+          },
+          "description": "switch versioning on for ${name}",
+          "body": ["  status = \"Enabled\""]
+        }
+      ]
+    },
+
+    "CKV_AWS_163": {
+      "title": "ECR image scanning on push is enabled",
+      "corpusCount": 3,
+      "category": "supply-chain",
+      "autoApplicable": true,
+      "rationale": "Additive, in-place, unambiguous. Scanning an image cannot deny a pull.",
+      "resourceTypes": ["aws_ecr_repository"],
+      "changes": [
+        {
+          "kind": "nested_attribute",
+          "block": "image_scanning_configuration",
+          "name": "scan_on_push",
+          "value": "true",
+          "description": "scan ${name} images on push"
+        },
+        {
+          "kind": "block",
+          "name": "image_scanning_configuration",
+          "description": "scan ${name} images on push",
+          "body": ["  scan_on_push = true"]
+        }
+      ]
+    },
+
+    "CKV_AWS_136": {
+      "title": "ECR repository is encrypted with KMS",
+      "corpusCount": 3,
+      "category": "encryption",
+      "autoApplicable": false,
+      "rationale": "encryption_configuration forces REPLACEMENT of the repository, which destroys every image in it. Never auto-applied despite being a single additive block.",
+      "resourceTypes": ["aws_ecr_repository"],
+      "changes": [
+        {
+          "kind": "nested_attribute",
+          "block": "encryption_configuration",
+          "name": "encryption_type",
+          "value": "\"KMS\"",
+          "description": "encrypt ${name} with KMS (WARNING: forces repository replacement)"
+        },
+        {
+          "kind": "block",
+          "name": "encryption_configuration",
+          "description": "encrypt ${name} with KMS (WARNING: forces repository replacement)",
+          "body": ["  encryption_type = \"KMS\""]
+        }
+      ]
+    },
+
+    "CKV_AWS_51": {
+      "title": "ECR image tags are immutable",
+      "corpusCount": 3,
+      "category": "supply-chain",
+      "autoApplicable": false,
+      "rationale": "Immutable tags break any CI job that re-pushes a moving tag (`:latest`). The next pipeline run fails. A human confirms the pipeline is ready.",
+      "resourceTypes": ["aws_ecr_repository"],
+      "changes": [
+        {
+          "kind": "attribute",
+          "name": "image_tag_mutability",
+          "value": "\"IMMUTABLE\"",
+          "description": "make ${name} image tags immutable"
+        }
+      ]
+    },
+
+    "CKV_AWS_150": {
+      "title": "Load balancer has deletion protection enabled",
+      "corpusCount": 2,
+      "category": "resilience",
+      "autoApplicable": true,
+      "rationale": "Single attribute, in-place, cannot break traffic. It only makes an accidental `destroy` fail, which is the point.",
+      "resourceTypes": ["aws_lb", "aws_alb"],
+      "changes": [
+        {
+          "kind": "attribute",
+          "name": "enable_deletion_protection",
+          "value": "true",
+          "description": "protect ${name} from accidental deletion"
+        }
+      ]
+    },
+
+    "CKV_AWS_131": {
+      "title": "ALB drops invalid HTTP headers",
+      "corpusCount": 2,
+      "category": "network",
+      "autoApplicable": true,
+      "rationale": "Additive, in-place. Drops malformed headers only -- a request smuggling defence, not an access control.",
+      "resourceTypes": ["aws_lb", "aws_alb"],
+      "changes": [
+        {
+          "kind": "attribute",
+          "name": "drop_invalid_header_fields",
+          "value": "true",
+          "description": "drop invalid HTTP headers at ${name}"
+        }
+      ]
+    },
+
+    "CKV_AWS_2": {
+      "title": "ALB listener uses HTTPS",
+      "corpusCount": 2,
+      "category": "network",
+      "autoApplicable": false,
+      "rationale": "Replaces the listener's default_action. Every plain-HTTP client starts getting a 301. Access-affecting, so diff-only.",
+      "resourceTypes": ["aws_lb_listener", "aws_alb_listener"],
+      "changes": [
+        {
+          "kind": "replace_block",
+          "name": "default_action",
+          "description": "redirect ${name} from HTTP to HTTPS",
+          "body": [
+            "  type = \"redirect\"",
+            "",
+            "  redirect {",
+            "    port        = \"443\"",
+            "    protocol    = \"HTTPS\"",
+            "    status_code = \"HTTP_301\"",
+            "  }"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_103": {
+      "title": "Load balancer uses at least TLS 1.2",
+      "corpusCount": 2,
+      "category": "network",
+      "autoApplicable": false,
+      "rationale": "Satisfied by the same HTTP->HTTPS redirect as CKV_AWS_2 (the graph check passes a listener whose default_action redirects to HTTPS). Access-affecting.",
+      "resourceTypes": ["aws_lb_listener", "aws_alb_listener"],
+      "changes": [
+        {
+          "kind": "replace_block",
+          "name": "default_action",
+          "description": "redirect ${name} to HTTPS so no plaintext listener remains",
+          "body": [
+            "  type = \"redirect\"",
+            "",
+            "  redirect {",
+            "    port        = \"443\"",
+            "    protocol    = \"HTTPS\"",
+            "    status_code = \"HTTP_301\"",
+            "  }"
+          ]
+        }
+      ]
+    },
+
+    "CKV2_AWS_20": {
+      "title": "ALB redirects HTTP requests into HTTPS",
+      "corpusCount": 2,
+      "category": "network",
+      "autoApplicable": false,
+      "rationale": "Reported on the aws_lb, fixed on its port-80 HTTP listener -- the linkTo `match` picks that listener specifically and not the HTTPS one. Access-affecting.",
+      "resourceTypes": ["aws_lb", "aws_alb"],
+      "changes": [
+        {
+          "kind": "replace_block",
+          "name": "default_action",
+          "linkTo": {
+            "resourceTypes": ["aws_lb_listener", "aws_alb_listener"],
+            "attribute": "load_balancer_arn",
+            "match": { "protocol": "\"HTTP\"" }
+          },
+          "description": "redirect the HTTP listener of ${name} to HTTPS",
+          "body": [
+            "  type = \"redirect\"",
+            "",
+            "  redirect {",
+            "    port        = \"443\"",
+            "    protocol    = \"HTTPS\"",
+            "    status_code = \"HTTP_301\"",
+            "  }"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_378": {
+      "title": "Load balancer target group does not use HTTP",
+      "corpusCount": 2,
+      "category": "network",
+      "autoApplicable": false,
+      "rationale": "Switching the target-group protocol to HTTPS means the targets must actually terminate TLS on that port and the health check follows. Break-the-service potential, so diff-only.",
+      "resourceTypes": ["aws_lb_target_group", "aws_alb_target_group"],
+      "changes": [
+        {
+          "kind": "attribute",
+          "name": "protocol",
+          "value": "\"HTTPS\"",
+          "description": "use HTTPS to reach the targets of ${name} (the targets must serve TLS on this port)"
+        }
+      ]
+    },
+
+    "CKV2_AWS_12": {
+      "title": "Default security group of every VPC restricts all traffic",
+      "corpusCount": 2,
+      "category": "security-group-cidr",
+      "autoApplicable": false,
+      "rationale": "CATEGORY 1 ON THE HARD NEVER-AUTO-APPLY LIST. Adopting the default SG into Terraform strips every rule AWS put there; anything silently relying on it loses connectivity at the next apply.",
+      "resourceTypes": ["aws_vpc"],
+      "changes": [
+        {
+          "kind": "companion",
+          "address": "aws_default_security_group.${name}_default",
+          "createsResourceTypes": ["aws_default_security_group"],
+          "description": "adopt and empty the default security group of ${name}",
+          "template": [
+            "# Added by iac-security-scan: adopts the VPC's default security group and",
+            "# removes every rule from it. Anything currently relying on the default SG",
+            "# WILL LOSE CONNECTIVITY. Check before applying.",
+            "resource \"aws_default_security_group\" \"${name}_default\" {",
+            "  vpc_id = ${address}.id",
+            "}"
+          ]
+        }
+      ]
+    },
+
+    "CKV2_AWS_28": {
+      "title": "Public-facing ALB is protected by WAF",
+      "corpusCount": 2,
+      "category": "network",
+      "autoApplicable": false,
+      "rationale": "A managed rule group in block mode can reject legitimate traffic on day one. Diff-only, and the template says to run it in count mode first.",
+      "resourceTypes": ["aws_lb", "aws_alb"],
+      "changes": [
+        { "kind": "shared", "id": "alb_waf" },
+        {
+          "kind": "companion",
+          "address": "aws_wafv2_web_acl_association.${name}_waf",
+          "createsResourceTypes": ["aws_wafv2_web_acl_association"],
+          "description": "put ${name} behind the WAF",
+          "template": [
+            "resource \"aws_wafv2_web_acl_association\" \"${name}_waf\" {",
+            "  resource_arn = ${address}.arn",
+            "  web_acl_arn  = aws_wafv2_web_acl.iac_scan_alb.arn",
+            "}"
+          ]
+        }
+      ]
+    },
+
+    "CKV_AWS_26": {
+      "title": "SNS topic is encrypted",
+      "corpusCount": 2,
+      "category": "kms-key-policy",
+      "autoApplicable": false,
+      "rationale": "Creates a KMS key. Category 4 on the never-auto-apply list -- and every existing publisher needs kms:GenerateDataKey on it or publishing starts failing.",
+      "resourceTypes": ["aws_sns_topic"],
+      "changes": [
+        { "kind": "shared", "id": "cmk" },
+        {
+          "kind": "attribute",
+          "name": "kms_master_key_id",
+          "value": "${shared.cmk.ref}.arn",
+          "description": "encrypt ${name} at rest with a CMK"
+        }
+      ]
+    },
+
+    "CKV_AWS_316": {
+      "title": "CodeBuild project does not run in privileged mode",
+      "corpusCount": 2,
+      "category": "hardening",
+      "autoApplicable": false,
+      "rationale": "Privileged mode is what lets a build run Docker. Turning it off breaks every docker-build pipeline that needs it. A human confirms.",
+      "resourceTypes": ["aws_codebuild_project"],
+      "changes": [
+        {
+          "kind": "nested_attribute",
+          "block": "environment",
+          "name": "privileged_mode",
+          "value": "false",
+          "description": "drop privileged mode from ${name} (breaks in-build Docker)"
+        }
+      ]
+    },
+
+    "CKV_AWS_147": {
+      "title": "CodeBuild project is encrypted with a CMK",
+      "corpusCount": 2,
+      "category": "kms-key-policy",
+      "autoApplicable": false,
+      "rationale": "Creates a KMS key. Category 4 on the never-auto-apply list.",
+      "resourceTypes": ["aws_codebuild_project"],
+      "changes": [
+        { "kind": "shared", "id": "cmk" },
+        {
+          "kind": "attribute",
+          "name": "encryption_key",
+          "value": "${shared.cmk.ref}.arn",
+          "description": "encrypt ${name} build artifacts with a CMK"
+        }
+      ]
+    }
+  }
+}
