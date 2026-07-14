@@ -72,8 +72,12 @@ class TestCatalogPort:
             MANUAL_REVIEW_PATTERNS,
             ONE_TIME_CONFIG_PATTERNS,
         ]
-        assert [len(g) for g in groups] == [5, 6, 3, 3, 6, 3]
-        assert len(ALL_PATTERNS) == 26  # ~25, per the spec's count
+        # Manual-review group is 7, not infrabot's 6: we added `hardcoded_secret`
+        # (CKV_SECRET_*), because -- unlike infrabot -- we run Checkov's secrets
+        # framework, and a committed credential is a manual rotate-and-migrate, never
+        # an IaC-attribute patch.
+        assert [len(g) for g in groups] == [5, 6, 3, 3, 7, 3]
+        assert len(ALL_PATTERNS) == 27
 
     def test_all_patterns_is_the_concatenation_in_order(self):
         expected = (

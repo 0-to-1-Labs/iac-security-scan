@@ -320,6 +320,22 @@ MANUAL_REVIEW_PATTERNS: List[ClassificationPattern] = [
         reason="Exposed secrets require immediate rotation and investigation",
     ),
     ClassificationPattern(
+        # Checkov's secrets framework (CKV_SECRET_*): a credential hardcoded in the
+        # source. NOT an IaC-attribute fix -- the moment it entered git history it is
+        # compromised, and adding a kms_key_arn (what a naive "iac" route implies)
+        # leaves it in every past commit. Rotation is the only real remediation.
+        name="hardcoded_secret",
+        checkPatterns=_rx(r"CKV_SECRET_\d+"),
+        services=(),
+        descriptionKeywords=(),
+        category="manual_review_required",
+        remediationType="manual",
+        reason=(
+            "A committed secret is compromised the moment it enters git history; "
+            "no IaC attribute change removes it. Rotate and move to a secret store."
+        ),
+    ),
+    ClassificationPattern(
         name="public_resource_review",
         checkPatterns=_rx(r"publicly.*accessible"),
         services=("s3", "ec2", "rds"),
@@ -394,6 +410,25 @@ ALL_PATTERNS: List[ClassificationPattern] = (
 # ---------------------------------------------------------------------------
 
 REMEDIATION_STEPS: Dict[str, Dict[str, Any]] = {
+    "hardcoded_secret": {
+        "steps": [
+            "Treat the credential as compromised and rotate it at the source now "
+            "(the DB, the API provider, the KMS key) -- it is live in git history.",
+            "Store the new value in a secret manager: "
+            "`aws secretsmanager create-secret --name <app>/<key> "
+            "--secret-string <NEW_VALUE>` (or an SSM SecureString parameter).",
+            "Reference it from IaC instead of inlining -- "
+            "`data.aws_secretsmanager_secret_version` or an SSM lookup -- so the "
+            "literal never re-enters the source.",
+            "Scrub the value from git history with `git filter-repo`; a revert only "
+            "hides it in a new commit, it stays readable in every old one.",
+        ],
+        "note": (
+            "Not an IaC-attribute fix: the secret is already exposed to anyone with "
+            "history access, and adding encryption does not un-expose it. Rotation is "
+            "the only real remediation; the store migration keeps it from recurring."
+        ),
+    },
     "s3_account_public_access_block": {
         "command": (
             "aws s3control put-public-access-block --account-id <ACCOUNT_ID> "
