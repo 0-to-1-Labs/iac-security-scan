@@ -1,0 +1,142 @@
+{
+  "_meta": {
+    "description": "Deterministic CloudFormation fix catalog (WS-13). The CFN analogue of fix-rules.json. Static, checked-in data: the model does not write to it at runtime. Each rule is an ADDITIVE, single-property fix that adds (or, for a wrong literal, rewrites) one property under a resource's Properties map. Every rule here was verified against the 5 CFN fixtures: it produces a valid unified diff, survives cfn-lint with no new errors, and makes the Checkov finding disappear on re-run.",
+    "corpus": "tests/fixtures/cfn-0*/ (5 fixtures, 66 total Checkov findings, 34 distinct rules)",
+    "excluded": {
+      "CKV_AWS_119": "DynamoDB CMK encryption. The fixtures ALREADY carry SSESpecification:{SSEEnabled:true} and Checkov still fires: it demands a customer-managed CMK (KMSMasterKeyId + a KMS key + its policy). That is a companion + a key-policy decision, not a single additive property. Exactly the plausible-looking WRONG fix WS-5 warns about (SSEEnabled:true looks like it should satisfy it; it does not).",
+      "CKV_AWS_18": "S3 access logging. Needs a destination bucket (a companion) and which bucket receives logs is an operational choice. Diff-only territory, deferred to the LLM path.",
+      "CKV_AWS_158": "CloudWatch log-group KMS. Needs a KMS key AND its key policy (never-auto-apply category 4).",
+      "CKV_AWS_173": "Lambda env-var KMS. Needs a customer CMK, and per run_checkov.py's note this rule is the wrong fix for the real problem (plaintext secrets): turning it green leaves the credentials in git.",
+      "CKV_AWS_117": "Lambda in VPC. Needs real subnet + security-group IDs; not synthesizable.",
+      "CKV_AWS_116": "Lambda DLQ. Needs a target queue/topic AND an execution-role grant the patch cannot add.",
+      "CKV_AWS_23": "SecurityGroup rule descriptions. Multi-attribute rewrite of the ingress/egress list, and the resource type is never-auto-apply anyway.",
+      "CKV_AWS_157": "RDS MultiAZ. The fixtures parameterize it with !If [IsProduction, true, false]; forcing true throws away a deliberate choice and is availability, not security.",
+      "CKV_AWS_111/108/109": "IAM policy scope. Never-auto-apply category 2 and never a single additive property."
+    }
+  },
+
+  "rules": {
+    "CKV_AWS_16": {
+      "title": "RDS instance storage is encrypted",
+      "corpusCount": 1,
+      "category": "encryption",
+      "autoApplicable": true,
+      "rationale": "Single property. The fixtures set StorageEncrypted:false (a literal), so this degrades to a literal->literal modify, which the safety line still allows (SPEC lists storage_encrypted=true as auto-applicable).",
+      "resourceTypes": ["AWS::RDS::DBInstance"],
+      "changes": [
+        {"kind": "attribute", "name": "StorageEncrypted", "value": "true"}
+      ]
+    },
+    "CKV_AWS_161": {
+      "title": "RDS instance has IAM database authentication enabled",
+      "corpusCount": 1,
+      "category": "auth",
+      "autoApplicable": true,
+      "rationale": "Additive single property. Enables an additional auth path; grants nothing away and does not disable password auth.",
+      "resourceTypes": ["AWS::RDS::DBInstance"],
+      "changes": [
+        {"kind": "attribute", "name": "EnableIAMDatabaseAuthentication", "value": "true"}
+      ]
+    },
+    "CKV_AWS_26": {
+      "title": "SNS topic is encrypted at rest",
+      "corpusCount": 2,
+      "category": "encryption",
+      "autoApplicable": true,
+      "rationale": "Additive single property. Uses the AWS-managed alias alias/aws/sns, so no KMS key or key policy is created and there is nothing to lock anyone out of.",
+      "resourceTypes": ["AWS::SNS::Topic"],
+      "changes": [
+        {"kind": "attribute", "name": "KmsMasterKeyId", "value": "alias/aws/sns"}
+      ]
+    },
+    "CKV_AWS_27": {
+      "title": "SQS queue is encrypted at rest",
+      "corpusCount": 2,
+      "category": "encryption",
+      "autoApplicable": true,
+      "rationale": "Additive single property. Checkov CKV_AWS_27 checks only that Properties/KmsMasterKeyId is present (ANY_VALUE); the AWS-managed alias alias/aws/sqs satisfies it with no key or policy to manage.",
+      "resourceTypes": ["AWS::SQS::Queue"],
+      "changes": [
+        {"kind": "attribute", "name": "KmsMasterKeyId", "value": "alias/aws/sqs"}
+      ]
+    },
+    "CKV_AWS_28": {
+      "title": "DynamoDB table has point-in-time recovery enabled",
+      "corpusCount": 1,
+      "category": "resilience",
+      "autoApplicable": true,
+      "rationale": "Additive single block. Enables continuous backups; access-neutral.",
+      "resourceTypes": ["AWS::DynamoDB::Table"],
+      "changes": [
+        {"kind": "block", "name": "PointInTimeRecoverySpecification", "body": ["PointInTimeRecoveryEnabled: true"]}
+      ]
+    },
+    "CKV_AWS_21": {
+      "title": "S3 bucket has versioning enabled",
+      "corpusCount": 2,
+      "category": "data-protection",
+      "autoApplicable": true,
+      "rationale": "Additive single block. Versioning is the canonical additive, no-access-impact S3 fix.",
+      "resourceTypes": ["AWS::S3::Bucket"],
+      "changes": [
+        {"kind": "block", "name": "VersioningConfiguration", "body": ["Status: Enabled"]}
+      ]
+    },
+    "CKV_AWS_115": {
+      "title": "Lambda function has a reserved-concurrency limit",
+      "corpusCount": 4,
+      "category": "resilience",
+      "autoApplicable": true,
+      "rationale": "Additive single property. Caps concurrent executions (a blast-radius / cost control). Verified to close on both AWS::Lambda::Function and AWS::Serverless::Function.",
+      "resourceTypes": ["AWS::Lambda::Function", "AWS::Serverless::Function"],
+      "changes": [
+        {"kind": "attribute", "name": "ReservedConcurrentExecutions", "value": "100"}
+      ]
+    },
+    "CKV_AWS_51": {
+      "title": "ECR repository has immutable image tags",
+      "corpusCount": 1,
+      "category": "supply-chain",
+      "autoApplicable": true,
+      "rationale": "Additive single property. Immutable tags prevent tag-overwrite supply-chain attacks; access-neutral.",
+      "resourceTypes": ["AWS::ECR::Repository"],
+      "changes": [
+        {"kind": "attribute", "name": "ImageTagMutability", "value": "IMMUTABLE"}
+      ]
+    },
+    "CKV_AWS_43": {
+      "title": "Kinesis stream is encrypted with KMS",
+      "corpusCount": 1,
+      "category": "encryption",
+      "autoApplicable": true,
+      "rationale": "Additive single block. Uses the AWS-managed alias alias/aws/kinesis, so no CMK or key policy is created.",
+      "resourceTypes": ["AWS::Kinesis::Stream"],
+      "changes": [
+        {"kind": "block", "name": "StreamEncryption", "body": ["EncryptionType: KMS", "KeyId: alias/aws/kinesis"]}
+      ]
+    },
+
+    "CKV_AWS_7": {
+      "title": "KMS key has rotation enabled",
+      "corpusCount": 1,
+      "category": "encryption",
+      "autoApplicable": false,
+      "rationale": "The fix (EnableKeyRotation: true) is genuinely additive and safe, but the resource is an AWS::KMS::Key -- a never-auto-apply resource type (SPEC 6.3 category 4). We emit the diff so the finding closes on review, but never auto-apply anything on a KMS key, because the blast radius of a key mistake is bricked decryption. Diff-only, structurally enforced by the never-list.",
+      "resourceTypes": ["AWS::KMS::Key"],
+      "changes": [
+        {"kind": "attribute", "name": "EnableKeyRotation", "value": "true"}
+      ]
+    },
+    "CKV_AWS_17": {
+      "title": "RDS instance is not publicly accessible",
+      "corpusCount": 1,
+      "category": "network",
+      "autoApplicable": false,
+      "rationale": "PubliclyAccessible: false is the correct secure value, but flipping it REMOVES a network path. Anything reaching the database over its public endpoint goes dark. That is access-affecting, so it is diff-only regardless of confidence -- PubliclyAccessible is on the CFN never-auto-apply attribute list.",
+      "resourceTypes": ["AWS::RDS::DBInstance"],
+      "changes": [
+        {"kind": "attribute", "name": "PubliclyAccessible", "value": "false"}
+      ]
+    }
+  }
+}
