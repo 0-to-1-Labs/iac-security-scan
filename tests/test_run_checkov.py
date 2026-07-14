@@ -32,16 +32,24 @@ import run_checkov  # noqa: E402
 
 # Pinned expectations (plan risk #10: an unpinned checkov upgrade reads as a
 # regression in our code). Measured against checkov 3.2.500.
+#
+# Counts are for the DEFAULT framework set (terraform + secrets). The `secrets`
+# framework is not cosmetic: tf-02's lambda.tf carries three plaintext production
+# credentials (a DB password, an `sk-prod-` API key, an encryption key) that a
+# terraform-only scan reports ZERO of -- CKV_SECRET_* lives in the secrets
+# framework. Those 3 (tf-02) + 1 (tf-05) are the delta from the terraform-only
+# baseline of 158. Being structurally blind to hardcoded secrets is not a posture
+# a security scanner gets to keep, so they are in the default counts.
 PINNED_CHECKOV_VERSION = "3.2.500"
 EXPECTED_FAILED = {
     "tf-01-three-tier-webapp": 23,
-    "tf-02-serverless-api": 55,
+    "tf-02-serverless-api": 58,  # 55 terraform + 3 hardcoded secrets
     "tf-03-data-lake": 26,
     "tf-04-container-platform": 35,
-    "tf-05-cicd-pipeline": 19,
+    "tf-05-cicd-pipeline": 20,  # 19 terraform + 1 hardcoded secret
 }
-EXPECTED_CORPUS_TOTAL = 158
-EXPECTED_DISTINCT_RULES = 56
+EXPECTED_CORPUS_TOTAL = 162  # 158 terraform + 4 secrets
+EXPECTED_DISTINCT_RULES = 58  # 56 terraform + CKV_SECRET_4 + CKV_SECRET_6
 
 
 def checkov_installed():
@@ -305,6 +313,30 @@ def test_corpus_totals():
         rules.update(f["ruleId"] for f in result["findings"])
     assert total == EXPECTED_CORPUS_TOTAL
     assert len(rules) == EXPECTED_DISTINCT_RULES
+
+
+@requires_checkov
+def test_hardcoded_secrets_are_found_by_default():
+    """tf-02's lambda.tf carries three plaintext production credentials. They live
+    in Checkov's `secrets` framework, which `--framework terraform` never runs. A
+    security scanner blind to hardcoded secrets is not one worth shipping, so the
+    secrets framework is in the DEFAULT set -- proven here, not just configured.
+
+    Guards against a silent revert to terraform-only, which would make the three
+    prod secrets in the corpus invisible again with every other test still green.
+    """
+    result = run_checkov.run_checkov(os.path.join(FIXTURES, "tf-02-serverless-api"))
+    secrets = [f for f in result["findings"] if f["ruleId"].startswith("CKV_SECRET")]
+    assert len(secrets) == 3, "the three plaintext secrets in lambda.tf must be found"
+    for f in secrets:
+        assert f["location"]["file"] == "lambda.tf"
+        assert f["location"]["startLine"], "a secret finding must carry a real line"
+
+
+@requires_checkov
+def test_the_default_framework_set_includes_secrets():
+    assert "terraform" in run_checkov.DEFAULT_FRAMEWORKS
+    assert "secrets" in run_checkov.DEFAULT_FRAMEWORKS
 
 
 @requires_checkov

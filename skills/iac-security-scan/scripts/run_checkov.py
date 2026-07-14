@@ -42,7 +42,7 @@ import os
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # Pinned expectation. Checkov's rule set moves; an unpinned upgrade reads as a
 # regression in our code (plan risk #10). We do not enforce this at runtime,
@@ -242,7 +242,26 @@ def degraded_result(path: str, reason: str) -> Dict[str, Any]:
     }
 
 
-def run_checkov(path: str, framework: str = "terraform") -> Dict[str, Any]:
+#: Checkov's frameworks are OPT-IN, and `terraform` alone does NOT include the
+#: `CKV_SECRET_*` detectors -- they live in the `secrets` framework. Scanning with
+#: `--framework terraform` therefore leaves hardcoded credentials structurally
+#: invisible: tf-02's lambda.tf carries three plaintext production secrets
+#: (DB_PASSWORD, an `sk-prod-` API key, an encryption key) and the terraform-only
+#: scan reports ZERO of them.
+#:
+#: Worse, Checkov *does* fire CKV_AWS_173 on that same resource -- a rule that asks
+#: only "is there a kms_key_arn?". Adding a KMS key turns that finding GREEN while
+#: all three credentials remain in git, in tfstate, and in every plan output. The
+#: rule engine points at the wrong fix and then reports success.
+#:
+#: Secrets in IaC are among the highest-value findings there are. They are not
+#: optional, so the framework list is not a knob we default to the narrow answer.
+DEFAULT_FRAMEWORKS = ("terraform", "secrets")
+
+
+def run_checkov(
+    path: str, framework: Union[str, Sequence[str]] = DEFAULT_FRAMEWORKS
+) -> Dict[str, Any]:
     """Run Checkov against `path` and return the normalized adapter payload."""
     binary = find_checkov()
     if not binary:
@@ -260,16 +279,8 @@ def run_checkov(path: str, framework: str = "terraform") -> Dict[str, Any]:
 
     # NOTE: --quiet is deliberately NOT passed. It suppresses passed_checks from
     # the JSON, and §7.2's "controls satisfied" section is derived from those.
-    cmd = [
-        binary,
-        "-d",
-        path,
-        "--framework",
-        framework,
-        "--output",
-        "json",
-        "--compact",
-    ]
+    frameworks = [framework] if isinstance(framework, str) else list(framework)
+    cmd = [binary, "-d", path, "--framework", *frameworks, "--output", "json", "--compact"]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=CHECKOV_TIMEOUT_SECONDS
@@ -324,7 +335,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Run Checkov and normalize its output to the iac-security-scan finding schema."
     )
     parser.add_argument("path", help="Directory to scan")
-    parser.add_argument("--framework", default="terraform", help="Checkov framework (default: terraform)")
+    parser.add_argument(
+        "--framework",
+        action="append",
+        help="Checkov framework; repeatable. Default: terraform + secrets (secrets "
+        "catches hardcoded credentials, which terraform-only scanning misses).",
+    )
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.path):
@@ -332,7 +348,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     try:
-        result = run_checkov(args.path, args.framework)
+        result = run_checkov(args.path, args.framework or DEFAULT_FRAMEWORKS)
     except Exception as exc:  # noqa: BLE001 - scan error must exit 2 (SPEC §9.2)
         print("error: checkov adapter failed: %s" % exc, file=sys.stderr)
         return 2
