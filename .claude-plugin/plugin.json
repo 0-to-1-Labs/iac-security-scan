@@ -1,6 +1,6 @@
 {
   "name": "iac-security-scan",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Scans Infrastructure as Code (Terraform) for security misconfigurations, maps findings to NIST 800-53 / FedRAMP controls, and generates validated remediation IaC. Pairs with iac-diagram-generator.",
   "author": { "name": "John P. Sasser", "url": "https://github.com/johnpsasser" },
   "homepage": "https://github.com/johnpsasser/iac-security-scan",
