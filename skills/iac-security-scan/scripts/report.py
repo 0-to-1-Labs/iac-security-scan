@@ -954,27 +954,22 @@ def scan(
     ``merge`` and calling ``build_report`` directly.
 
     ``iac_format`` (WS-14) selects the parser and the Checkov framework set.
-    Defaults to ``terraform``, so every existing caller is byte-for-byte
-    unchanged. Only Terraform has a deterministic fixer wired in here; K8s and
-    Compose are findings-only, and the report renders them as such (no phantom
-    diffs) — see ``build_report``.
+    When it is ``None`` the format is detected from the directory (the CLI
+    passes ``None`` unless ``--iac-format`` is given). Terraform and
+    CloudFormation have deterministic fixers wired in here; K8s and Compose are
+    findings-only, and the report renders them as such (no phantom diffs) —
+    see ``build_report``.
     """
     from merge_findings import merge
-    from patch_terraform import (
-        FixCatalog,
-        generate_file_patches,
-        generate_security_patches,
-        load_terraform_resources,
-    )
     from run_checkov import frameworks_for_format, run_checkov
 
     import contextlib
 
-    # Explicit format wins (every existing caller passes one, so they are
-    # unchanged). Otherwise detect from the directory's contents, and fall back to
-    # terraform only when nothing is recognizable -- the parser's own degradation
-    # then fires. This is the guard against scanning a CloudFormation repo with the
-    # Terraform framework and reporting a false-clean.
+    # Explicit format wins. Otherwise detect from the directory's contents, and
+    # fall back to terraform only when nothing is recognizable -- the parser's
+    # own degradation then fires. This is the guard against scanning a
+    # CloudFormation repo with the Terraform framework and reporting a
+    # false-clean.
     detected = detect_iac_format(root) if not iac_format else None
     fmt = (iac_format or detected or "terraform").lower()
 
@@ -984,20 +979,43 @@ def scan(
     # still shows, on stderr.
     with contextlib.redirect_stdout(sys.stderr):
         parse_result = parse_for_format(fmt, root)
+    # A parser error dict carries no `format`; stamp it so the degradation
+    # notice names the right install hint (cfn-lint for CFN, not tfparse).
+    parse_result.setdefault("format", fmt)
     merge_result = merge(checkov_result.get("findings") or [], parse_result=parse_result)
 
     patches: List[Any] = []
     file_patches: List[Any] = []
-    # Terraform only: it is the one format with a deterministic fix catalog wired
-    # in. And no line provenance -> no patching regardless. Do not fabricate a diff
-    # against lines we do not have; the degradation notice says exactly this.
-    if fmt == "terraform" and parse_result.get("parseTier") == FULL_PARSE_TIER:
+    fix_catalog_rule_ids: List[str] = []
+    # Only with line provenance: no line numbers -> no patching regardless. Do
+    # not fabricate a diff against lines we do not have; the degradation notice
+    # says exactly this.
+    full_tier = parse_result.get("parseTier") in FULL_PARSE_TIERS.get(fmt, set())
+    if fmt == "terraform" and full_tier:
+        from patch_terraform import (
+            FixCatalog,
+            generate_file_patches,
+            generate_security_patches,
+            load_terraform_resources,
+        )
+
         catalog = FixCatalog.load()
         resources, _ = load_terraform_resources(root)
         patches = generate_security_patches(
             root, merge_result["findings"], catalog, resources, use_fmt=use_fmt
         )
         file_patches = generate_file_patches(root, patches, resources, use_fmt=use_fmt)
+        fix_catalog_rule_ids = list(catalog.rule_ids)
+    elif fmt == "cloudformation" and full_tier and not parse_result.get("degraded"):
+        import patch_cloudformation as pc
+
+        cfn_catalog = pc.CFNFixCatalog.load()
+        cfn_resources, _ = pc.load_cloudformation_resources(root)
+        patches = pc.generate_security_patches(
+            root, merge_result["findings"], cfn_catalog, cfn_resources
+        )
+        file_patches = pc.generate_file_patches(root, patches, cfn_resources)
+        fix_catalog_rule_ids = list(cfn_catalog.rule_ids)
 
     compliance_coverage = None
     if compliance:
@@ -1024,6 +1042,7 @@ def scan(
         root=root,
         compliance=compliance,
         compliance_coverage=compliance_coverage,
+        fix_catalog_rule_ids=fix_catalog_rule_ids,
         iac_format=fmt,
     )
 
@@ -1055,9 +1074,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--iac-format",
         dest="iac_format",
         choices=("terraform", "cloudformation", "kubernetes", "docker-compose"),
-        default="terraform",
-        help="IaC format to scan (default: terraform). Selects the parser and the "
-        "Checkov framework set. K8s/Compose are findings-only (no auto-fix).",
+        default=None,
+        help="IaC format to scan (default: detect from the directory; terraform "
+        "when nothing is recognizable). Selects the parser and the Checkov "
+        "framework set. K8s/Compose are findings-only (no auto-fix).",
     )
     parser.add_argument("--format", choices=("markdown", "json", "sarif"), default="markdown")
     parser.add_argument("--out", help="write to this file instead of stdout")

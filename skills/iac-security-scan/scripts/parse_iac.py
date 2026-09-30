@@ -964,27 +964,139 @@ def extract_regex_dependencies(resources):
     return dependencies
 
 
+CFN_TEMPLATE_GLOBS = ("*.yaml", "*.yml", "*.json", "*.template")
+
+
+def _looks_like_cfn_template(path):
+    """Cheap sniff: a CloudFormation template declares a top-level `Resources`
+    map (and usually `AWSTemplateFormatVersion`). Skips k8s manifests, compose
+    files, parameter files and lockfiles that share the extensions."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return False
+    if "AWSTemplateFormatVersion" in head:
+        return True
+    if path.endswith(".json"):
+        return '"Resources"' in head
+    return bool(re.search(r"^Resources\s*:", head, re.MULTILINE))
+
+
+def find_cloudformation_templates(root):
+    """Every template file under ``root`` (recursive), sorted, sniffed."""
+    import glob as file_glob
+
+    found = set()
+    for pattern in CFN_TEMPLATE_GLOBS:
+        found.update(file_glob.glob(os.path.join(root, "**", pattern), recursive=True))
+    return sorted(p for p in found if os.path.isfile(p) and _looks_like_cfn_template(p))
+
+
 def parse_cloudformation(path):
     """
-    Parse CloudFormation template (YAML or JSON).
+    Parse a CloudFormation template (YAML or JSON), or a DIRECTORY of them.
 
     Uses a tiered approach:
     1. cfn-lint (most accurate, resolves intrinsic functions)
     2. PyYAML fallback (basic parsing)
+
+    For a directory every template is parsed and the results are merged; each
+    resource's ``location.file`` is relative to the directory, so downstream
+    joins (Checkov, the CFN patcher, SARIF) line up the same way they do for
+    a Terraform tree.
     """
+    if os.path.isdir(path):
+        return _parse_cloudformation_dir(path)
+    return _parse_cloudformation_file(path, root=path)
+
+
+def _parse_cloudformation_file(path, root=None):
     print(f"Parsing CloudFormation template: {path}")
 
     # Try cfn-lint first (most accurate)
     if CFNLINT_AVAILABLE:
         print("  Using cfn-lint")
-        result = parse_cloudformation_with_cfnlint(path)
+        result = parse_cloudformation_with_cfnlint(path, root=root)
         if "error" not in result:
             return result
         print(f"  cfn-lint failed: {result.get('error')}, falling back...")
 
     # Fall back to basic YAML parsing
     print("  Using PyYAML fallback")
-    return parse_cloudformation_with_yaml(path)
+    return parse_cloudformation_with_yaml(path, root=root)
+
+
+def _parse_cloudformation_dir(root):
+    root = os.path.abspath(root)
+    templates = find_cloudformation_templates(root)
+    print(f"Parsing CloudFormation templates in: {root} ({len(templates)} found)")
+    if not templates:
+        return {
+            "error": (
+                "No CloudFormation templates found under %s (looked for %s with a "
+                "top-level Resources map)" % (root, ", ".join(CFN_TEMPLATE_GLOBS))
+            )
+        }
+
+    merged = {
+        "format": "cloudformation",
+        "parser": "cfn-lint",
+        "parseTier": "cfn-lint",
+        "degraded": False,
+        "degradationReason": None,
+        "lineProvenance": True,
+        "resources_with_line_provenance": 0,
+        "resources_missing_line_provenance": [],
+        "resources": [],
+        "parameters": {},
+        "outputs": {},
+        "conditions": [],
+        "total_resources": 0,
+        "dependencies": {},
+        "templates": [],
+        "template_errors": {},
+    }
+    degraded_reasons = []
+    for template in templates:
+        rel = normalize_repo_path(template, root)
+        result = _parse_cloudformation_file(template, root=root)
+        if "error" in result:
+            merged["template_errors"][rel] = result["error"]
+            degraded_reasons.append("%s: %s" % (rel, result["error"]))
+            continue
+        merged["templates"].append(rel)
+        merged["resources"].extend(result.get("resources") or [])
+        merged["resources_with_line_provenance"] += result.get(
+            "resources_with_line_provenance", 0
+        )
+        merged["resources_missing_line_provenance"].extend(
+            result.get("resources_missing_line_provenance") or []
+        )
+        # cfn-lint tier returns dicts; the yaml tier returns key lists.
+        for key in ("parameters", "outputs"):
+            value = result.get(key) or {}
+            if isinstance(value, dict):
+                merged[key].update(value)
+            else:
+                merged[key].update({k: {} for k in value})
+        merged["conditions"].extend(result.get("conditions") or [])
+        merged["dependencies"].update(result.get("dependencies") or {})
+        if result.get("degraded"):
+            merged["parser"] = result.get("parser", merged["parser"])
+            merged["parseTier"] = result.get("parseTier", merged["parseTier"])
+            degraded_reasons.append(
+                "%s: %s" % (rel, result.get("degradationReason") or "degraded parse")
+            )
+
+    merged["total_resources"] = len(merged["resources"])
+    if not merged["templates"]:
+        return {"error": "Failed to parse every CloudFormation template: " + "; ".join(degraded_reasons)}
+    if degraded_reasons:
+        merged["degraded"] = True
+        merged["lineProvenance"] = False
+        merged["degradationReason"] = "; ".join(degraded_reasons)
+    return merged
 
 
 def _cfn_decode(path):
@@ -1000,13 +1112,17 @@ def _cfn_decode(path):
     return loaded
 
 
-def parse_cloudformation_with_cfnlint(path):
+def parse_cloudformation_with_cfnlint(path, root=None):
     """
     Parse CloudFormation using cfn-lint.
     Provides intrinsic function resolution and accurate dependency tracking, and
     — the reason this is the FULL tier — per-resource line provenance from
     cfn-lint's decoded line marks.
+
+    ``root`` is what ``location.file`` is made relative to (the template itself
+    for a single-file scan, the directory for a directory scan).
     """
+    root = root or path
     try:
         template_data = _cfn_decode(path)
 
@@ -1045,7 +1161,7 @@ def parse_cloudformation_with_cfnlint(path):
 
             location = build_yaml_location(
                 path, start_line, end_line, logical_id, resource_type, service,
-                root=path,
+                root=root,
             )
 
             resources.append({
@@ -1198,11 +1314,12 @@ def extract_cloudformation_refs_deep(obj, resource_ids, parameter_ids, refs=None
     return refs
 
 
-def parse_cloudformation_with_yaml(path):
+def parse_cloudformation_with_yaml(path, root=None):
     """
     Parse CloudFormation using PyYAML (fallback).
     Basic parsing without intrinsic function resolution.
     """
+    root = root or path
     try:
         with open(path, 'r') as f:
             if path.endswith('.json'):
@@ -1231,7 +1348,7 @@ def parse_cloudformation_with_yaml(path):
                 "service": service,
                 # DEGRADED: PyYAML preserves no line numbers.
                 "location": build_yaml_location(
-                    path, None, None, logical_id, resource_type, service, root=path
+                    path, None, None, logical_id, resource_type, service, root=root
                 ),
                 "properties": properties,
                 "depends_on": resource.get('DependsOn', [])

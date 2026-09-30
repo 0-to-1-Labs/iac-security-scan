@@ -147,6 +147,40 @@ def test_cfn_preserves_the_existing_resource_contract(cfn_corpus):
         assert key in r, f"lost contract key {key}"
 
 
+@pytest.mark.skipif(not parse_iac.CFNLINT_AVAILABLE, reason="cfn-lint not installed")
+def test_cfn_directory_scan_merges_every_template(tmp_path):
+    """ISS-10: `parse_cloudformation(<dir>)` used to fail with `Is a directory`.
+    A directory of templates parses to one result whose `location.file` values
+    are relative to the directory, so Checkov and the patcher join on them."""
+    import shutil
+
+    root = tmp_path / "stacks"
+    (root / "network").mkdir(parents=True)
+    shutil.copy(FIXTURES / "cfn-05-static-website" / "template.yaml", root / "site.yaml")
+    shutil.copy(FIXTURES / "cfn-04-event-driven" / "template.yaml", root / "network" / "events.yml")
+    (root / "params.json").write_text('[{"ParameterKey": "x", "ParameterValue": "y"}]', encoding="utf-8")
+    (root / "notes.yaml").write_text("just: notes\n", encoding="utf-8")
+
+    result = parse_iac.parse_cloudformation(str(root))
+    assert "error" not in result
+    assert result["parseTier"] == "cfn-lint"
+    assert result["degraded"] is False
+    assert sorted(result["templates"]) == ["network/events.yml", "site.yaml"]
+    single_a = parse_iac.parse_cloudformation(str(FIXTURES / "cfn-05-static-website" / "template.yaml"))
+    single_b = parse_iac.parse_cloudformation(str(FIXTURES / "cfn-04-event-driven" / "template.yaml"))
+    assert result["total_resources"] == single_a["total_resources"] + single_b["total_resources"]
+    files = {r["location"]["file"] for r in result["resources"]}
+    assert files == {"site.yaml", "network/events.yml"}
+    assert all(r["location"]["startLine"] for r in result["resources"])
+
+
+def test_cfn_directory_with_no_templates_is_a_loud_error(tmp_path):
+    (tmp_path / "readme.yaml").write_text("hello: world\n", encoding="utf-8")
+    result = parse_iac.parse_cloudformation(str(tmp_path))
+    assert "error" in result
+    assert "No CloudFormation templates" in result["error"]
+
+
 def test_cfn_yaml_fallback_is_degraded():
     """cfn-lint absent (or failing) -> PyYAML tier, NO line numbers, and it must
     announce itself as a degraded scan, not a clean one."""
