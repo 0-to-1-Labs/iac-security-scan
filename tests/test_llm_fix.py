@@ -515,6 +515,55 @@ resource "aws_iam_role_policy" "app" {
         assert result.bailReason
 
 
+class TestClaudeCliIsolation:
+    """ISS-05: the nested `claude -p` runs over a prompt that is mostly untrusted
+    IaC. It must have no tools, no session persistence, none of the scanned
+    repo's settings/hooks/MCP servers, and must not run inside that repo."""
+
+    def test_argv_carries_every_isolation_flag(self):
+        argv = llm_fix.claude_cli_args("opus")
+        assert argv[:3] == ["-p", "--model", "opus"]
+        assert "--restricted" in argv
+        assert "--no-session-persistence" in argv
+        assert "--strict-mcp-config" in argv
+        assert argv[argv.index("--tools") + 1] == ""
+        assert argv[argv.index("--system-prompt") + 1] == llm_fix.CLAUDE_CLI_SYSTEM_PROMPT
+        assert "--bare" not in argv  # --bare disables OAuth; subscription users could not run it
+
+    def test_system_prompt_frames_the_user_turn_as_data(self):
+        text = llm_fix.CLAUDE_CLI_SYSTEM_PROMPT
+        assert "DATA" in text
+        assert "UNTRUSTED_IAC_DATA" in text
+        assert "no tools" in text
+
+    def test_call_runs_outside_the_module_and_passes_the_flags(self, tmp_path, monkeypatch):
+        seen = {}
+
+        class _Proc:
+            returncode = 0
+            stdout = "resource {}"
+            stderr = ""
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            seen["cwd"] = kwargs.get("cwd")
+            seen["input"] = kwargs.get("input")
+            return _Proc()
+
+        monkeypatch.setenv("CLAUDE_BIN", "/fake/claude")
+        monkeypatch.setattr(llm_fix.subprocess, "run", fake_run)
+        monkeypatch.chdir(tmp_path)  # pretend the caller sits in the scanned repo
+
+        out = llm_fix.claude_cli_model("opus")("PROMPT")
+
+        assert out == "resource {}"
+        assert seen["argv"][0] == "/fake/claude"
+        assert seen["argv"][1:] == llm_fix.claude_cli_args("opus")
+        assert seen["input"] == "PROMPT"
+        assert seen["cwd"] and os.path.realpath(seen["cwd"]) != os.path.realpath(str(tmp_path))
+        assert not os.path.exists(seen["cwd"]), "the temp cwd is removed after the call"
+
+
 class TestSafety:
     def test_temp_dir_is_removed_even_when_the_model_blows_up(self, task, monkeypatch):
         seen: List[str] = []
