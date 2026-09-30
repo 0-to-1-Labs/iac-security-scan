@@ -81,9 +81,9 @@ diff-only.
 ## What it will not do
 
 - **It will not invent a compliance mapping.** Control mappings and baseline severities
-  are checked-in, curated data files. The AWS severity seeds are signed off; the NIST
-  800-53 control map and baseline are curated but their human sign-off is still
-  **pending** (see `_meta.gate3` in the data files). A hallucinated `AC-17` in a FedRAMP
+  are checked-in, curated data files. The AWS severity seeds and the NIST 800-53
+  control map and baseline are human-reviewed and signed off (see `_meta.gate1` and
+  `_meta.gate3` in the data files). A hallucinated `AC-17` in a FedRAMP
   package is the single worst thing this tool could do. Unmapped is reported as
   unmapped.
 - **It will not auto-apply an access-affecting change.** Security-group CIDR narrowing,

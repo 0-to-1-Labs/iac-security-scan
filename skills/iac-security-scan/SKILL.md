@@ -134,6 +134,6 @@ says "done" is a liar.
 - `data/rule-severity.json` — baseline severities (AWS seeds signed off; the `CKV_K8S_*`
   block is not).
 - `data/control-map.json`, `data/control-baseline-800-53.json` — NIST 800-53 mappings.
-  Curated; human sign-off is **pending** (`_meta.gate3.reviewed: false`). Never
-  generate a control ID at runtime.
+  Curated and signed off (`_meta.gate3.reviewed: true`, 2026-09-30). Never generate a
+  control ID at runtime.
 - `data/fix-rules.json`, `data/fix-rules-cfn.json` — the deterministic fix catalogs.

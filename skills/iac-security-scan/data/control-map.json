@@ -16,9 +16,10 @@
     ],
     "checkovToProwler": "The rule->concept assignment reuses WS-3's human-reviewed Checkov->Prowler concept matches recorded in rule-severity.json.",
     "gate3": {
-      "reviewed": false,
-      "date": "2026-07-14",
-      "note": "PENDING human sign-off (GATE 3)."
+      "reviewed": true,
+      "date": "2026-09-30",
+      "reviewer": "John P. Sasser",
+      "note": "Signed off (GATE 3) by John P. Sasser on 2026-09-30. Curated on 2026-07-14."
     }
   },
   "CKV_AWS_19": {

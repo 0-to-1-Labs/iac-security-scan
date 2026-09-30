@@ -5,9 +5,10 @@
     "baseline": "800-53",
     "note": "baseControls are family+number only (enhancements collapsed); a control is 'assessable from IaC' iff >=1 Checkov rule in control-map.json maps to it.",
     "gate3": {
-      "reviewed": false,
-      "date": "2026-07-14",
-      "note": "PENDING human sign-off (GATE 3)."
+      "reviewed": true,
+      "date": "2026-09-30",
+      "reviewer": "John P. Sasser",
+      "note": "Signed off (GATE 3) by John P. Sasser on 2026-09-30. Curated on 2026-07-14."
     }
   },
   "baseControls": [
