@@ -71,7 +71,7 @@ SARIF_VERSION = "2.1.0"
 
 TOOL_NAME = "iac-security-scan"
 TOOL_VERSION = "0.1.0"
-TOOL_INFO_URI = "https://github.com/johnpsasser/iac-security-scan"
+TOOL_INFO_URI = "https://github.com/0-to-1-Labs/iac-security-scan"
 
 # The tier that carries line numbers. Same constant report.py gates patching on.
 FULL_PARSE_TIER = "tfparse"

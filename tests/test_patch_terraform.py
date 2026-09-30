@@ -78,7 +78,7 @@ def change(**kwargs) -> pt.PatchChange:
 
 
 # ===========================================================================
-# THE SAFETY TEST. It does not get relaxed. (SPEC §6.3, IMPLEMENTATION_PLAN WS-5)
+# THE SAFETY TEST. It does not get relaxed. (SPEC §6.3, workstream WS-5)
 # ===========================================================================
 
 
@@ -351,6 +351,200 @@ class TestParserBeatsTheRegex:
 # ===========================================================================
 # Patch generation -- ported from terraform-patch.test.ts:121
 # ===========================================================================
+
+
+class TestBraceCountingIgnoresStringsCommentsAndHeredocs:
+    """ISS-02: a brace inside a string, a comment, or a heredoc used to shift the
+    depth counter, so the existing top-level attribute was not found and a
+    second copy was inserted -- `Attribute redefined`, which Terraform rejects.
+    The fix must UPDATE the existing attribute, never add a duplicate."""
+
+    def _single_patch(self, tmp_path, catalog, hcl, address="aws_cloudwatch_log_group.a"):
+        root = write_tree(tmp_path, {"main.tf": hcl})
+        resources, _ = pt.load_terraform_resources(root)
+        patches = pt.generate_security_patches(
+            root, [finding("CKV_AWS_338", address)], catalog, resources, use_fmt=False
+        )
+        assert len(patches) == 1
+        return patches[0]
+
+    def test_brace_inside_a_string_value(self, tmp_path, catalog):
+        patch = self._single_patch(
+            tmp_path, catalog,
+            'resource "aws_cloudwatch_log_group" "a" {\n'
+            '  name = "/a"\n'
+            '  tags = {\n'
+            '    Note = "}"\n'
+            '  }\n'
+            '  retention_in_days = 7\n'
+            '}\n',
+        )
+        assert [c.type for c in patch.changes] == ["modify"]
+        assert patch.diff.count("+  retention_in_days = 365") == 1
+        assert "-  retention_in_days = 7" in patch.diff
+
+    def test_brace_inside_a_heredoc(self, tmp_path, catalog):
+        patch = self._single_patch(
+            tmp_path, catalog,
+            'resource "aws_cloudwatch_log_group" "a" {\n'
+            '  name = "/a"\n'
+            '  policy_doc = <<EOT\n'
+            '{ "x": { "y": 1 } }\n'
+            'EOT\n'
+            '  retention_in_days = 7\n'
+            '}\n',
+        )
+        assert [c.type for c in patch.changes] == ["modify"]
+        assert patch.diff.count("retention_in_days = 365") == 1
+
+    def test_brace_inside_a_comment(self, tmp_path, catalog):
+        patch = self._single_patch(
+            tmp_path, catalog,
+            'resource "aws_cloudwatch_log_group" "a" {\n'
+            '  name = "/a" # trailing { comment\n'
+            '  // another } one\n'
+            '  retention_in_days = 7\n'
+            '}\n',
+        )
+        assert [c.type for c in patch.changes] == ["modify"]
+        assert patch.diff.count("retention_in_days = 365") == 1
+
+    def test_attribute_inside_a_heredoc_body_is_not_the_resources_own(self, tmp_path, catalog):
+        """`retention_in_days = 7` inside a heredoc body must not be mistaken for
+        a top-level attribute: the real fix is an ADD."""
+        patch = self._single_patch(
+            tmp_path, catalog,
+            'resource "aws_cloudwatch_log_group" "a" {\n'
+            '  name = "/a"\n'
+            '  note = <<EOT\n'
+            'retention_in_days = 7\n'
+            'EOT\n'
+            '}\n',
+        )
+        assert [c.type for c in patch.changes] == ["add"]
+        assert "-retention_in_days = 7" not in patch.diff
+        assert "+  retention_in_days = 365" in patch.diff
+
+    def test_mask_structure_keeps_structure_and_blanks_the_rest(self):
+        masked = pt._mask_structure(
+            'a = "x { y"  # c {\n'
+            'b = <<EOF\n'
+            '{\n'
+            'EOF\n'
+            'c = "${var.x == "}" ? 1 : 2}"\n'
+            'd {'
+        )
+        assert masked == ['a = ""  ', "b = ", "", "", 'c = ""', "d {"]
+
+    def test_an_add_never_duplicates_an_existing_attribute(self, tmp_path):
+        """Belt and braces: even a change built as `add` is applied as an update
+        when the attribute already exists at the top level."""
+        root = write_tree(tmp_path, {
+            "main.tf": 'resource "aws_cloudwatch_log_group" "a" {\n'
+                       '  retention_in_days = 7\n'
+                       '}\n'
+        })
+        resources, _ = pt.load_terraform_resources(root)
+        c = change(type="add", kind="attribute", path="retention_in_days", newValue="365",
+                   targetAddress="aws_cloudwatch_log_group.a")
+        with open(os.path.join(root, "main.tf"), encoding="utf-8") as fh:
+            lines = fh.read().split("\n")
+        out = pt.apply_changes_to_lines(lines, [c], {r.address: r for r in resources})
+        assert sum(1 for line in out if "retention_in_days" in line) == 1
+        assert any("retention_in_days = 365" in line for line in out)
+
+
+class TestPatchedTextThatDoesNotParseIsNeverAutoApplied:
+    """ISS-02: a failed `terraform fmt` on the patched text used to be swallowed
+    (fmt returned None, the unformatted text went out as auto-applicable)."""
+
+    @pytest.fixture
+    def broken_fmt(self, monkeypatch):
+        """Stand in a terraform that accepts the original and rejects the patch."""
+        real = pt._run_terraform_fmt
+
+        def fake(content):
+            if "365" in content:
+                return None, "Error: Attribute redefined"
+            return content, None
+
+        monkeypatch.setattr(pt, "_terraform_available", lambda: True)
+        monkeypatch.setattr(pt, "_run_terraform_fmt", fake)
+        yield
+        monkeypatch.setattr(pt, "_run_terraform_fmt", real)
+
+    def test_generated_patch_is_blocked(self, tmp_path, catalog, broken_fmt):
+        root = write_tree(tmp_path, {"main.tf": 'resource "aws_cloudwatch_log_group" "a" {\n  name = "/a"\n}\n'})
+        resources, _ = pt.load_terraform_resources(root)
+        patches = pt.generate_security_patches(
+            root, [finding("CKV_AWS_338", "aws_cloudwatch_log_group.a")], catalog, resources
+        )
+        assert len(patches) == 1
+        assert patches[0].autoApplicable is False
+        assert "does not parse" in (patches[0].autoApplyBlockedBy or "")
+        assert "Attribute redefined" in patches[0].autoApplyBlockedBy
+
+    def test_apply_refuses_to_write(self, tmp_path, catalog, broken_fmt):
+        hcl = 'resource "aws_cloudwatch_log_group" "a" {\n  name = "/a"\n}\n'
+        root = write_tree(tmp_path, {"main.tf": hcl})
+        resources, _ = pt.load_terraform_resources(root)
+        patches = pt.generate_security_patches(
+            root, [finding("CKV_AWS_338", "aws_cloudwatch_log_group.a")], catalog, resources
+        )
+        # force the flag on to prove the apply path has its own check
+        patches[0].autoApplicable = True
+        result = pt.apply_patches_to_tree(root, patches, resources, only_auto_applicable=True)
+        assert result.success is False
+        assert result.modifiedFiles == []
+        assert any("does not parse" in e for e in result.errors)
+        with open(os.path.join(root, "main.tf"), encoding="utf-8") as fh:
+            assert fh.read() == hcl
+
+    def test_fmt_normalize_reports_the_error(self, broken_fmt):
+        text, err = pt.fmt_normalize("a = 1\n", "a = 365\n")
+        assert text == "a = 365\n"
+        assert err and "Attribute redefined" in err
+        assert pt.fmt_normalize("a = 1\n", "a = 2\n") == ("a = 2\n", None)
+
+
+class TestCountAndForEachInstancesShareOneBlock:
+    """ISS-03: findings on `name[0]` and `name[1]` land on ONE physical block.
+    One insertion, one patch claiming both findings -- never a duplicate."""
+
+    HCL = (
+        'resource "aws_cloudwatch_log_group" "c" {\n'
+        '  count = 2\n'
+        '  name  = "/c-${count.index}"\n'
+        '}\n'
+    )
+
+    def test_indexed_findings_produce_one_insertion(self, tmp_path, catalog):
+        root = write_tree(tmp_path, {"main.tf": self.HCL})
+        resources, _ = pt.load_terraform_resources(root)
+        assert {r.address for r in resources} >= {
+            "aws_cloudwatch_log_group.c[0]", "aws_cloudwatch_log_group.c[1]"
+        }
+        findings = [
+            finding("CKV_AWS_338", "aws_cloudwatch_log_group.c[0]"),
+            finding("CKV_AWS_338", "aws_cloudwatch_log_group.c[1]"),
+        ]
+        patches = pt.generate_security_patches(root, findings, catalog, resources, use_fmt=False)
+        assert len(patches) == 1
+        assert sorted(patches[0].findingIds) == sorted(f["id"] for f in findings)
+        assert patches[0].diff.count("retention_in_days = 365") == 1
+        file_patches = pt.generate_file_patches(root, patches, resources, use_fmt=False)
+        assert file_patches[0].diff.count("retention_in_days = 365") == 1
+
+    def test_bare_address_joins_to_the_expanded_block(self, tmp_path, catalog):
+        """Checkov may report the bare address; the join must not miss."""
+        root = write_tree(tmp_path, {"main.tf": self.HCL})
+        resources, _ = pt.load_terraform_resources(root)
+        patches = pt.generate_security_patches(
+            root, [finding("CKV_AWS_338", "aws_cloudwatch_log_group.c")], catalog, resources,
+            use_fmt=False,
+        )
+        assert len(patches) == 1
+        assert patches[0].diff.count("retention_in_days = 365") == 1
 
 
 class TestPatchGeneration:

@@ -621,17 +621,26 @@ def load_cloudformation_resources(
 ) -> Tuple[List[CFNResource], Dict[str, Any]]:
     """Load resources from `parse_iac.py`. Raises if the parse is degraded.
 
+    ``template_file`` may be one template or a DIRECTORY of templates; for a
+    directory every resource's ``file`` is relative to it, so the patches that
+    come out apply against that directory.
+
     A degraded parse has no line provenance, and without it nothing can be
     anchored. We refuse rather than emit a diff we cannot place.
     """
     parsed = _parse(template_file)
+    if parsed.get("error"):
+        raise RuntimeError(parsed["error"])
     if parsed.get("degraded"):
         raise RuntimeError(
             "DEGRADED PARSE (tier=%s): no line provenance, so no CFN patches can "
             "be anchored. Install cfn-lint and re-run." % parsed.get("parseTier")
         )
 
-    root = os.path.dirname(os.path.abspath(template_file))
+    if os.path.isdir(template_file):
+        root = os.path.abspath(template_file)
+    else:
+        root = os.path.dirname(os.path.abspath(template_file))
     resources: List[CFNResource] = []
     file_cache: Dict[str, List[str]] = {}
 

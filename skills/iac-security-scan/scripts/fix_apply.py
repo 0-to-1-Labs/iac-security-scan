@@ -17,8 +17,8 @@ safe, and every rail below is load-bearing:
   4. **Never an access-affecting change** -- SG CIDR narrowing, IAM wildcard
      removal, bucket policies, KMS key policies, network ACLs. Diff-only, always,
      regardless of model confidence. The gate is `patch_terraform.auto_apply_blocker()`
-     and it is imported, never reimplemented, because a second copy of a safety
-     check is a second copy that can drift.
+     (and its CloudFormation mirror) and it is imported, never reimplemented,
+     because a second copy of a safety check is a second copy that can drift.
   5. **One commit per finding group** -- one commit per resource the findings land
      on -- so a bad fix is one `git revert` away, not a wholesale rollback.
   6. **Report what was skipped and why.** A `--fix` run that silently applies 4 of
@@ -26,8 +26,21 @@ safe, and every rail below is load-bearing:
      named in the report with a specific reason. `applied + skipped == total`,
      enforced by `FixRunResult.accounts_for_every_finding()`.
 
+Two more invariants, both added after a real bug:
+
+  * **Patches are generated and applied against the SAME directory** -- the
+    module directory the user pointed at. Every git call runs with ``-C`` that
+    directory, so a module that is a subdirectory of its repository never has
+    its patch applied to a same-named file at the repository root. After a
+    write, git must see the target file as modified, or the group fails.
+  * **A patch terraform rejects is never written.** `terraform fmt` runs on the
+    patched text (patch_terraform), and when the `terraform` binary is present
+    `terraform validate` runs on a temp copy of the patched module before the
+    commit. A validate failure reverts the group's files and is reported.
+
 Never runs `terraform apply`. Never `plan`s against a real backend. The only
-external commands are `git`, and (inside `patch_terraform`) `terraform fmt`.
+external commands are `git`, `terraform fmt`, and `terraform init -backend=false`
++ `terraform validate` (which download providers but never read state).
 
 Between finding groups the tree is **re-parsed**, so each group's changes are
 computed against the file as it now stands. Applying group 2's patch with group
@@ -41,14 +54,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import patch_cloudformation as pc  # noqa: E402
 import patch_terraform as pt  # noqa: E402
 
 # The safety gate itself. Imported, not reimplemented (rail 4).
@@ -57,11 +73,17 @@ from patch_terraform import (  # noqa: E402
     NEVER_AUTO_APPLY_CATEGORIES,
     NEVER_AUTO_APPLY_RESOURCE_TYPES,
     auto_apply_blocker,
-    create_patch_branch,
     generate_commit_message,
 )
 
 BRANCH_PREFIX = "iac-security-scan/fix-"
+
+TERRAFORM_TIMEOUT_SECONDS = 300
+
+#: What a temp copy of the module must never carry (state, provider binaries).
+_COPY_IGNORE = shutil.ignore_patterns(
+    ".git", ".terraform", "*.tfstate", "*.tfstate.*", ".terragrunt-cache"
+)
 
 
 # ===========================================================================
@@ -82,7 +104,7 @@ SKIP_HEADINGS = {
     SKIP_NOT_AUTO_APPLICABLE: "Not auto-applicable -- review the diff",
     SKIP_NO_PATCH: "No deterministic patch available",
     SKIP_LLM_GENERATED: "LLM-generated fix -- never auto-applied",
-    SKIP_NOT_IAC: "Not fixable in Terraform",
+    SKIP_NOT_IAC: "Not fixable in IaC",
     SKIP_APPLY_FAILED: "Patch failed to apply",
 }
 
@@ -122,6 +144,9 @@ class AppliedGroup:
     severity: str
     commitHash: Optional[str] = None
     modifiedFiles: List[str] = field(default_factory=list)
+    #: "passed", or why validation did not run ("terraform not on PATH", ...).
+    #: A group whose validation FAILED is never in the applied set.
+    validation: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -132,6 +157,7 @@ class AppliedGroup:
             "severity": self.severity,
             "commitHash": self.commitHash,
             "modifiedFiles": list(self.modifiedFiles),
+            "validation": self.validation,
         }
 
 
@@ -142,8 +168,11 @@ class FixRunResult:
     refused: bool = False       # a rail said no; nothing was written
     error: Optional[str] = None
     repoRoot: str = ""
+    moduleDir: str = ""
+    iacFormat: str = "terraform"
     originalBranch: str = ""
     branch: Optional[str] = None       # None when nothing was applied
+    returnedToOriginalBranch: bool = False
     totalFindings: int = 0
     applied: List[AppliedGroup] = field(default_factory=list)
     skipped: List[SkippedFinding] = field(default_factory=list)
@@ -176,8 +205,11 @@ class FixRunResult:
             "refused": self.refused,
             "error": self.error,
             "repoRoot": self.repoRoot,
+            "moduleDir": self.moduleDir,
+            "iacFormat": self.iacFormat,
             "originalBranch": self.originalBranch,
             "branch": self.branch,
+            "returnedToOriginalBranch": self.returnedToOriginalBranch,
             "totalFindings": self.totalFindings,
             "appliedCount": self.appliedCount,
             "skippedCount": self.skippedCount,
@@ -185,6 +217,115 @@ class FixRunResult:
             "applied": [g.to_dict() for g in self.applied],
             "skipped": [s.to_dict() for s in self.skipped],
         }
+
+
+# ===========================================================================
+# Format backends: Terraform (patch_terraform) and CloudFormation
+# (patch_cloudformation). Same rails, same gate shape, different patcher.
+# ===========================================================================
+
+
+@dataclass
+class Backend:
+    name: str
+    label: str
+    load_catalog: Callable[[], Any]
+    load_resources: Callable[[str], Tuple[Sequence[Any], Dict[str, Any]]]
+    generate_patches: Callable[[str, Sequence[Dict[str, Any]], Any, Sequence[Any], bool], List[Any]]
+    blocker: Callable[[Any], Optional[str]]            # patch -> reason or None
+    is_access_affecting: Callable[[Any], bool]        # patch -> label only
+    apply: Callable[[str, Sequence[Any], Sequence[Any], bool], pt.PatchApplicationResult]
+
+
+def _tf_is_access_affecting(patch: pt.TerraformPatch) -> bool:
+    """LABEL ONLY -- which bucket a blocked patch is reported under.
+
+    The GATE is `auto_apply_blocker()`; this function never decides whether
+    something may be applied, only how to name the reason we skipped it. If it
+    disagrees with the gate, the gate wins and the finding is still skipped.
+    """
+    for change in patch.changes:
+        if change.category in NEVER_AUTO_APPLY_CATEGORIES:
+            return True
+        touched = set(change.createsResourceTypes)
+        if change.targetAddress:
+            touched.add(change.targetAddress.split(".")[0])
+        if touched & NEVER_AUTO_APPLY_RESOURCE_TYPES:
+            return True
+        if change.path in NEVER_AUTO_APPLY_ATTRIBUTES and change.kind in (
+            "attribute",
+            "block",
+        ):
+            return True
+    return False
+
+
+def _cfn_is_access_affecting(patch: pc.CFNPatch) -> bool:
+    if patch.resourceType in pc.NEVER_AUTO_APPLY_RESOURCE_TYPES_CFN:
+        return True
+    for change in patch.changes:
+        if change.category in NEVER_AUTO_APPLY_CATEGORIES:
+            return True
+        if set(change.createsResourceTypes) & pc.NEVER_AUTO_APPLY_RESOURCE_TYPES_CFN:
+            return True
+        if change.path in pc.NEVER_AUTO_APPLY_ATTRIBUTES_CFN and change.kind in (
+            "attribute",
+            "block",
+        ):
+            return True
+    return False
+
+
+TERRAFORM_BACKEND = Backend(
+    name="terraform",
+    label="Terraform",
+    load_catalog=pt.FixCatalog.load,
+    load_resources=pt.load_terraform_resources,
+    generate_patches=lambda path, findings, catalog, resources, use_fmt: (
+        pt.generate_security_patches(path, findings, catalog, resources, use_fmt=use_fmt)
+    ),
+    blocker=lambda patch: auto_apply_blocker(patch.changes),
+    is_access_affecting=_tf_is_access_affecting,
+    apply=lambda path, patches, resources, use_fmt: pt.apply_patches_to_tree(
+        path, patches, resources, only_auto_applicable=True, use_fmt=use_fmt
+    ),
+)
+
+CLOUDFORMATION_BACKEND = Backend(
+    name="cloudformation",
+    label="CloudFormation",
+    load_catalog=pc.CFNFixCatalog.load,
+    load_resources=pc.load_cloudformation_resources,
+    generate_patches=lambda path, findings, catalog, resources, use_fmt: (
+        pc.generate_security_patches(path, findings, catalog, resources)
+    ),
+    blocker=lambda patch: pc.cfn_auto_apply_blocker(patch.changes, patch.resourceType),
+    is_access_affecting=_cfn_is_access_affecting,
+    apply=lambda path, patches, resources, use_fmt: pc.apply_patches_to_tree(
+        path, patches, resources, only_auto_applicable=True
+    ),
+)
+
+BACKENDS = {
+    "terraform": TERRAFORM_BACKEND,
+    "cloudformation": CLOUDFORMATION_BACKEND,
+}
+
+
+def backend_for(iac_format: Optional[str], path: str) -> Backend:
+    """Explicit format wins; otherwise detect from the directory (report.py's
+    detector, the guard against scanning a CFN dir as Terraform)."""
+    fmt = (iac_format or "").lower()
+    if not fmt:
+        from report import detect_iac_format
+
+        fmt = detect_iac_format(path) or "terraform"
+    backend = BACKENDS.get(fmt)
+    if backend is None:
+        raise ValueError(
+            "--fix supports terraform and cloudformation; %r is findings-only" % fmt
+        )
+    return backend
 
 
 # ===========================================================================
@@ -241,7 +382,7 @@ def _check_preconditions(root: str) -> Optional[str]:
         return (
             "Refusing to run --fix: the working tree has uncommitted changes.\n"
             f"{listed}{more}\n\n"
-            "Commit or stash them first. --fix writes to your Terraform files and "
+            "Commit or stash them first. --fix writes to your IaC files and "
             "commits them; on a dirty tree it would sweep your work into its own "
             "commit, and you could not tell its changes from yours. There is no "
             "--force (SPEC §6.3 rail 1)."
@@ -251,31 +392,69 @@ def _check_preconditions(root: str) -> Optional[str]:
 
 
 # ===========================================================================
-# Triage (rails 3 + 4 + 6)
+# terraform validate on a temp copy (never in place, never plan/apply)
 # ===========================================================================
 
 
-def _is_access_affecting(changes: Sequence[pt.PatchChange]) -> bool:
-    """LABEL ONLY -- which bucket a blocked patch is reported under.
+def terraform_validate_module(
+    module_dir: str, plugin_cache_dir: Optional[str] = None
+) -> Dict[str, Any]:
+    """`terraform init -backend=false` + `terraform validate` on a COPY of the module.
 
-    The GATE is `auto_apply_blocker()`; this function never decides whether
-    something may be applied, only how to name the reason we skipped it. If it
-    disagrees with the gate, the gate wins and the finding is still skipped.
+    Returns ``{"available", "valid": True|False|None, "error"}``. ``valid`` is
+    None when the answer is unknown (terraform absent, or `init` could not
+    fetch providers -- it downloads them from the registry, so it needs the
+    network); False only when terraform ran and rejected the module. Never
+    reads state, never plans.
     """
-    for change in changes:
-        if change.category in NEVER_AUTO_APPLY_CATEGORIES:
-            return True
-        touched = set(change.createsResourceTypes)
-        if change.targetAddress:
-            touched.add(change.targetAddress.split(".")[0])
-        if touched & NEVER_AUTO_APPLY_RESOURCE_TYPES:
-            return True
-        if change.path in NEVER_AUTO_APPLY_ATTRIBUTES and change.kind in (
-            "attribute",
-            "block",
-        ):
-            return True
-    return False
+    if shutil.which("terraform") is None:
+        return {"available": False, "valid": None, "error": "terraform not on PATH"}
+
+    env = dict(os.environ)
+    env["TF_IN_AUTOMATION"] = "1"
+    env["TF_INPUT"] = "0"
+    if plugin_cache_dir:
+        env["TF_PLUGIN_CACHE_DIR"] = plugin_cache_dir
+
+    tmp = tempfile.mkdtemp(prefix="iac-security-scan-validate-")
+    try:
+        dest = os.path.join(tmp, "module")
+        shutil.copytree(module_dir, dest, ignore=_COPY_IGNORE)
+        try:
+            init = subprocess.run(
+                ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
+                cwd=dest, capture_output=True, text=True,
+                timeout=TERRAFORM_TIMEOUT_SECONDS, env=env,
+            )
+            if init.returncode != 0:
+                return {
+                    "available": True,
+                    "valid": None,
+                    "error": "terraform init failed (providers or modules could not "
+                    "be resolved): %s" % (init.stderr or init.stdout).strip()[:600],
+                }
+            proc = subprocess.run(
+                ["terraform", "validate", "-no-color"],
+                cwd=dest, capture_output=True, text=True,
+                timeout=TERRAFORM_TIMEOUT_SECONDS, env=env,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"available": True, "valid": None, "error": "terraform validate could not run: %s" % exc}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if proc.returncode == 0:
+        return {"available": True, "valid": True, "error": None}
+    return {
+        "available": True,
+        "valid": False,
+        "error": (proc.stdout or proc.stderr or "").strip()[:2000],
+    }
+
+
+# ===========================================================================
+# Triage (rails 3 + 4 + 6)
+# ===========================================================================
 
 
 def _finding_key(finding: Dict[str, Any]) -> Tuple[str, str, str]:
@@ -302,19 +481,20 @@ def _skip(finding: Dict[str, Any], code: str, reason: str) -> SkippedFinding:
 
 def triage(
     findings: Sequence[Dict[str, Any]],
-    patches: Sequence[pt.TerraformPatch],
-) -> Tuple[List[pt.TerraformPatch], List[SkippedFinding]]:
+    patches: Sequence[Any],
+    backend: Backend = TERRAFORM_BACKEND,
+) -> Tuple[List[Any], List[SkippedFinding]]:
     """Split every finding into (auto-applicable patch) or (skipped, with a reason).
 
     Every finding lands in exactly one bucket. There is no third bucket, no
     "other", and nothing falls off the end -- that is the whole point of rail 6.
     """
-    by_finding: Dict[str, pt.TerraformPatch] = {}
+    by_finding: Dict[str, Any] = {}
     for patch in patches:
         for fid in patch.findingIds:
             by_finding[fid] = patch
 
-    auto: List[pt.TerraformPatch] = []
+    auto: List[Any] = []
     skipped: List[SkippedFinding] = []
 
     for finding in findings:
@@ -322,12 +502,12 @@ def triage(
         patch = by_finding.get(fid)
 
         if patch is not None:
-            blocker = auto_apply_blocker(patch.changes)  # THE gate (rail 4)
+            blocker = backend.blocker(patch)  # THE gate (rail 4)
             if blocker is None and patch.autoApplicable:
                 continue  # handled below, once per patch, not once per finding
             code = (
                 SKIP_ACCESS_AFFECTING
-                if _is_access_affecting(patch.changes)
+                if backend.is_access_affecting(patch)
                 else SKIP_NOT_AUTO_APPLICABLE
             )
             reason = (
@@ -346,7 +526,7 @@ def triage(
                 _skip(
                     finding,
                     SKIP_NOT_IAC,
-                    f"not fixable in Terraform (remediationType={remediation}, "
+                    f"not fixable in {backend.label} (remediationType={remediation}, "
                     f"category={category}); the report carries the CLI or console "
                     "steps for it",
                 )
@@ -376,7 +556,7 @@ def triage(
         )
 
     for patch in patches:
-        if patch.autoApplicable and auto_apply_blocker(patch.changes) is None:
+        if patch.autoApplicable and backend.blocker(patch) is None:
             auto.append(patch)
 
     auto.sort(key=lambda p: (p.file, p.address))
@@ -389,50 +569,88 @@ def triage(
 
 
 def _findings_for(
-    findings: Sequence[Dict[str, Any]], patch: pt.TerraformPatch
+    findings: Sequence[Dict[str, Any]], patch: Any
 ) -> List[Dict[str, Any]]:
     claimed = set(patch.findingIds)
     return [f for f in findings if f.get("id", "") in claimed]
 
 
 def _commit_group(
-    root: str,
+    module_dir: str,
     branch: str,
     branch_exists: bool,
-    group_patches: Sequence[pt.TerraformPatch],
-    resources: Sequence[pt.TerraformResource],
+    group_patches: Sequence[Any],
+    resources: Sequence[Any],
     use_fmt: bool,
-) -> Tuple[bool, Optional[str], List[str], Optional[str]]:
-    """Apply + commit ONE finding group. Returns (ok, commitHash, files, error).
+    backend: Backend,
+    validate: bool,
+    plugin_cache_dir: Optional[str],
+) -> Tuple[bool, Optional[str], List[str], Optional[str], Optional[str]]:
+    """Apply + commit ONE finding group.
 
-    The first group goes through `patch_terraform.create_patch_branch()` -- the
-    ported `createPatchBranch()` (terraform-patch.ts:1009) -- which re-checks the
-    dirty tree, cuts the branch and commits. Subsequent groups land on that same
-    branch as their own commits (rail 5).
+    Returns ``(ok, commitHash, files, error, validation)``.
+
+    Everything here runs with ``git -C module_dir``: the patches were generated
+    against ``module_dir``, so they are applied there and the same relative
+    paths are what ``git add`` receives. The first group cuts the branch;
+    later groups land on it as their own commits (rail 5).
     """
     if not branch_exists:
-        res = create_patch_branch(root, group_patches, resources, branch_name=branch)
-        return res.success, res.commitHash, res.committedFiles, res.error
+        checkout = pt._git(module_dir, "checkout", "-b", branch)
+        if checkout.returncode != 0:
+            return False, None, [], f"could not create branch {branch}: {checkout.stderr.strip()}", None
 
-    applied = pt.apply_patches_to_tree(
-        root, group_patches, resources, only_auto_applicable=True, use_fmt=use_fmt
-    )
+    applied = backend.apply(module_dir, group_patches, resources, use_fmt)
     if not applied.success or not applied.modifiedFiles:
-        return False, None, [], "; ".join(applied.errors) or "patch produced no change"
+        return False, None, [], "; ".join(applied.errors) or "patch produced no change", None
+
+    # The write must be visible to git as a change to the TARGET file. If it is
+    # not, something was written somewhere else (or nowhere) and reporting
+    # success would be a lie.
+    seen = pt._git(module_dir, "status", "--porcelain", "--", *applied.modifiedFiles)
+    if not seen.stdout.strip():
+        return (
+            False, None, [],
+            "the target file(s) are unchanged after patching (%s); nothing to commit"
+            % ", ".join(applied.modifiedFiles),
+            None,
+        )
+
+    validation: Optional[str] = "not run for %s" % backend.label
+    if backend.name == "terraform":
+        if not validate:
+            validation = "skipped (--no-validate)"
+        else:
+            tf = terraform_validate_module(module_dir, plugin_cache_dir)
+            if tf["valid"] is False:
+                # Do not commit HCL terraform rejects. Put the files back.
+                pt._git(module_dir, "checkout", "--", *applied.modifiedFiles)
+                return (
+                    False, None, [],
+                    "terraform validate rejected the patched module (the change was "
+                    "reverted, nothing was committed): %s" % tf["error"],
+                    None,
+                )
+            validation = "passed" if tf["valid"] else "unknown: %s" % tf["error"]
 
     for file in applied.modifiedFiles:
-        pt._git(root, "add", file)
+        pt._git(module_dir, "add", file)
 
     message = generate_commit_message(
-        list(group_patches), applied.appliedCount, len(applied.modifiedFiles)
+        list(group_patches), applied.appliedCount, len(applied.modifiedFiles),
+        label=backend.label,
     )
-    commit = pt._git(root, "commit", "-m", message)
+    commit = pt._git(module_dir, "commit", "-m", message)
     if commit.returncode != 0:
-        return False, None, [], f"commit failed: {commit.stderr.strip()}"
+        return False, None, [], f"commit failed: {commit.stderr.strip()}", None
 
-    return True, pt._git(root, "rev-parse", "HEAD").stdout.strip(), list(
-        applied.modifiedFiles
-    ), None
+    return (
+        True,
+        pt._git(module_dir, "rev-parse", "HEAD").stdout.strip(),
+        list(applied.modifiedFiles),
+        None,
+        validation,
+    )
 
 
 def run_fix(
@@ -442,14 +660,23 @@ def run_fix(
     dry_run: bool = False,
     branch_name: Optional[str] = None,
     use_fmt: bool = True,
-    catalog: Optional[pt.FixCatalog] = None,
+    catalog: Optional[Any] = None,
+    iac_format: Optional[str] = None,
+    validate: bool = True,
 ) -> FixRunResult:
-    """The `--fix` path. All six rails, in order."""
+    """The `--fix` path. All six rails, in order.
+
+    ``path`` is the module directory. Patches are generated against it AND
+    applied to it; the git repository that contains it is only used to check
+    preconditions and to report the root.
+    """
     findings = list(findings)
     result = FixRunResult(dryRun=dry_run, totalFindings=len(findings))
 
-    root = repo_root(path) or os.path.abspath(path)
+    module_dir = os.path.abspath(path)
+    root = repo_root(module_dir) or module_dir
     result.repoRoot = root
+    result.moduleDir = module_dir
 
     # ---- rails 1 + 2: preconditions, before anything is generated ------------
     refusal = _check_preconditions(root)
@@ -459,19 +686,24 @@ def run_fix(
         return result
     result.originalBranch = current_branch(root)
 
-    catalog = catalog or pt.FixCatalog.load()
+    try:
+        backend = backend_for(iac_format, module_dir)
+    except ValueError as exc:
+        result.error = str(exc)
+        return result
+    result.iacFormat = backend.name
+
+    catalog = catalog or backend.load_catalog()
 
     try:
-        resources, _ = pt.load_terraform_resources(path)
-        patches = pt.generate_security_patches(
-            path, findings, catalog, resources, use_fmt=use_fmt
-        )
+        resources, _ = backend.load_resources(module_dir)
+        patches = backend.generate_patches(module_dir, findings, catalog, resources, use_fmt)
     except Exception as exc:  # noqa: BLE001 -- a scan error is exit 2 (SPEC §9.2)
         result.error = f"patch generation failed: {exc}"
         return result
 
     # ---- rails 3 + 4 + 6: triage --------------------------------------------
-    auto_patches, skipped = triage(findings, patches)
+    auto_patches, skipped = triage(findings, patches, backend)
     result.skipped = skipped
 
     if dry_run:
@@ -488,84 +720,104 @@ def run_fix(
                 )
             )
         result.success = True
+        result.returnedToOriginalBranch = True
         return result
 
     if not auto_patches:
         result.success = True
+        result.returnedToOriginalBranch = True
         return result
 
     # ---- rails 2 + 5: a new branch, one commit per finding group -------------
     branch = branch_name or default_branch_name()
     branch_exists = False
+    # One provider cache for the whole run, so `terraform init` on the temp copy
+    # downloads each provider once, not once per finding group.
+    plugin_cache_dir = tempfile.mkdtemp(prefix="iac-security-scan-tf-cache-")
 
-    for patch in auto_patches:
-        group_findings = _findings_for(findings, patch)
+    try:
+        for patch in auto_patches:
+            group_findings = _findings_for(findings, patch)
 
-        # Re-parse: the tree has moved under us if an earlier group touched this
-        # file, and stale line numbers corrupt files.
-        try:
-            fresh_resources, _ = pt.load_terraform_resources(path)
-            regenerated = pt.generate_security_patches(
-                path, group_findings, catalog, fresh_resources, use_fmt=use_fmt
-            )
-        except Exception as exc:  # noqa: BLE001
-            regenerated = []
-            regen_error: Optional[str] = str(exc)
-        else:
-            regen_error = None
-
-        # Re-gate the regenerated patch. Same gate, no shortcuts, no "we already
-        # checked" -- the tree changed, so the check runs again.
-        group_patches = [
-            p
-            for p in regenerated
-            if p.autoApplicable and auto_apply_blocker(p.changes) is None
-        ]
-
-        if not group_patches:
-            for finding in group_findings:
-                result.skipped.append(
-                    _skip(
-                        finding,
-                        SKIP_APPLY_FAILED,
-                        "the patch could not be regenerated against the tree as it "
-                        "now stands"
-                        + (f": {regen_error}" if regen_error else "")
-                        + " -- nothing was applied for this finding",
-                    )
+            # Re-parse: the tree has moved under us if an earlier group touched this
+            # file, and stale line numbers corrupt files.
+            try:
+                fresh_resources, _ = backend.load_resources(module_dir)
+                regenerated = backend.generate_patches(
+                    module_dir, group_findings, catalog, fresh_resources, use_fmt
                 )
-            continue
+            except Exception as exc:  # noqa: BLE001
+                regenerated = []
+                regen_error: Optional[str] = str(exc)
+            else:
+                regen_error = None
 
-        ok, commit_hash, files, error = _commit_group(
-            root, branch, branch_exists, group_patches, fresh_resources, use_fmt
-        )
+            # Re-gate the regenerated patch. Same gate, no shortcuts, no "we already
+            # checked" -- the tree changed, so the check runs again.
+            group_patches = [
+                p for p in regenerated if p.autoApplicable and backend.blocker(p) is None
+            ]
 
-        if not ok:
-            for finding in group_findings:
-                result.skipped.append(
-                    _skip(
-                        finding,
-                        SKIP_APPLY_FAILED,
-                        f"applying the patch failed: {error or 'unknown error'}",
+            if not group_patches:
+                for finding in group_findings:
+                    result.skipped.append(
+                        _skip(
+                            finding,
+                            SKIP_APPLY_FAILED,
+                            "the patch could not be regenerated against the tree as it "
+                            "now stands"
+                            + (f": {regen_error}" if regen_error else "")
+                            + " -- nothing was applied for this finding",
+                        )
                     )
-                )
-            if not branch_exists:
-                _abandon_branch(root, branch, result.originalBranch)
-            continue
+                continue
 
-        branch_exists = True
-        result.branch = branch
-        result.applied.append(
-            AppliedGroup(
-                resourceAddress=patch.address,
-                file=patch.file,
-                ruleIds=list(patch.ruleIds),
-                findingIds=list(patch.findingIds),
-                severity=patch.severity,
-                commitHash=commit_hash,
-                modifiedFiles=files,
+            ok, commit_hash, files, error, validation = _commit_group(
+                module_dir, branch, branch_exists, group_patches, fresh_resources,
+                use_fmt, backend, validate, plugin_cache_dir,
             )
-        )
+
+            if not ok:
+                for finding in group_findings:
+                    result.skipped.append(
+                        _skip(
+                            finding,
+                            SKIP_APPLY_FAILED,
+                            f"applying the patch failed: {error or 'unknown error'}",
+                        )
+                    )
+                if not branch_exists:
+                    _abandon_branch(module_dir, branch, result.originalBranch)
+                continue
+
+            branch_exists = True
+            result.branch = branch
+            result.applied.append(
+                AppliedGroup(
+                    resourceAddress=patch.address,
+                    file=patch.file,
+                    ruleIds=list(patch.ruleIds),
+                    findingIds=list(patch.findingIds),
+                    severity=patch.severity,
+                    commitHash=commit_hash,
+                    modifiedFiles=files,
+                    validation=validation,
+                )
+            )
+    finally:
+        shutil.rmtree(plugin_cache_dir, ignore_errors=True)
+
+    # ---- rail 2, second half: return to where the user was --------------------
+    if branch_exists:
+        back = pt._git(module_dir, "checkout", result.originalBranch)
+        result.returnedToOriginalBranch = back.returncode == 0
+        if not result.returnedToOriginalBranch:
+            result.error = (
+                f"fixes are committed on `{branch}`, but returning to "
+                f"`{result.originalBranch}` failed: {back.stderr.strip()}"
+            )
+    else:
+        result.returnedToOriginalBranch = True
 
     result.success = True
     return result
@@ -612,6 +864,17 @@ def format_fix_report(result: FixRunResult) -> str:
             f"{'s' if len(result.applied) != 1 else ''}, one per finding group). "
             f"Your branch `{result.originalBranch}` is untouched."
         )
+        if result.returnedToOriginalBranch:
+            lines.append(
+                f"You are back on `{result.originalBranch}`. Review with "
+                f"`git diff {result.originalBranch}...{result.branch}`, then merge "
+                "or delete the branch."
+            )
+        else:
+            lines.append(
+                f"**You are still on `{result.branch}`** — returning to "
+                f"`{result.originalBranch}` failed: {result.error}"
+            )
     else:
         lines.append(
             f"Applied **0 of {total}** findings — nothing here is auto-applicable. "
@@ -624,9 +887,10 @@ def format_fix_report(result: FixRunResult) -> str:
         lines += ["## Applied", ""]
         for group in result.applied:
             short = (group.commitHash or "")[:8]
+            validation = f" — validate: {group.validation}" if group.validation else ""
             lines.append(
                 f"- `{group.resourceAddress}` ({group.severity}) — "
-                f"{', '.join(group.ruleIds)} — `{short}`"
+                f"{', '.join(group.ruleIds)} — `{short}`{validation}"
             )
         lines.append("")
 
@@ -673,16 +937,22 @@ def format_fix_report(result: FixRunResult) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply auto-applicable Terraform security fixes on a new branch. "
-            "Never on a dirty tree, never an access-affecting change, and it "
-            "always tells you what it skipped."
+            "Apply auto-applicable Terraform or CloudFormation security fixes on a "
+            "new branch. Never on a dirty tree, never an access-affecting change, "
+            "and it always tells you what it skipped."
         )
     )
-    parser.add_argument("path", help="Terraform directory (inside a git repo)")
+    parser.add_argument("path", help="IaC module directory (inside a git repo)")
     parser.add_argument(
         "--findings",
         required=True,
         help="Path to a findings JSON payload ({\"findings\": [...]})",
+    )
+    parser.add_argument(
+        "--iac-format",
+        dest="iac_format",
+        choices=tuple(BACKENDS),
+        help="terraform or cloudformation (default: detect from the directory)",
     )
     parser.add_argument(
         "--dry-run",
@@ -692,6 +962,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--branch", help="Override the generated branch name")
     parser.add_argument("--json", action="store_true", help="Emit JSON, not markdown")
     parser.add_argument("--no-fmt", action="store_true", help="Skip terraform fmt")
+    parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="Skip `terraform validate` on the patched module (it needs the network "
+        "to fetch providers)",
+    )
     # There is deliberately no --force. See rail 1.
     args = parser.parse_args(argv)
 
@@ -714,6 +990,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         dry_run=args.dry_run,
         branch_name=args.branch,
         use_fmt=not args.no_fmt,
+        iac_format=args.iac_format,
+        validate=not args.no_validate,
     )
 
     if args.json:

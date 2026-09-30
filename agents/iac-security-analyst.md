@@ -1,7 +1,7 @@
 ---
 name: iac-security-analyst
 description: Performs the architectural-depth pass over a group of IaC security findings — business impact, attack scenario, exploitability, remediation approach, and cross-resource exposure chains. Used internally by /iac-scan, fanned out one instance per finding group, in parallel.
-model: opus
+model: fable
 color: red
 ---
 

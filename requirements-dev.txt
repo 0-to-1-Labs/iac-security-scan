@@ -1,0 +1,7 @@
+# Test-suite dependencies: `pip install -r requirements.txt -r requirements-dev.txt`
+# then `python -m pytest -p no:cacheprovider`. The `terraform` binary must be on
+# PATH for the fmt/validate tests; tests that need it skip otherwise.
+pytest>=8
+boto3>=1.34
+python-hcl2>=4.3
+jsonschema>=4

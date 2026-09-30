@@ -47,6 +47,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 # Pinned expectation. Checkov's rule set moves; an unpinned upgrade reads as a
 # regression in our code (plan risk #10). We do not enforce this at runtime,
 # but we report what we actually ran so drift is visible.
+#
+# Checked 2026-09-30 against checkov 3.3.21: it adds CKV_AWS_394 (pins the
+# aws_availability_zones data source), which fires on the fixture corpus and
+# has no seed in data/rule-severity.json, so the corpus counts and the
+# unmapped-rule tests fail. Moving the pin needs a reviewed severity seed and a
+# re-graded answer key, not just a version bump.
 EXPECTED_CHECKOV_VERSION = "3.2.500"
 
 INSTALL_HINT = "pip install checkov==%s" % EXPECTED_CHECKOV_VERSION

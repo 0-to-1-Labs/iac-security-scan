@@ -43,7 +43,13 @@ PROMPT-INJECTION HARDENING (SPEC §11) — the rules for this file:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional
+import os
+import sys
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from findings import EXPLOITABILITIES, REMEDIATION_COMPLEXITIES  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Untrusted-input delimiting (SPEC §11)
@@ -550,6 +556,24 @@ def _to_list(value: str) -> List[str]:
     return items
 
 
+def _vocab_word(label: str, value: str, vocabulary: Sequence[str]) -> str:
+    """The first word of a labelled answer, checked against its vocabulary.
+
+    The agent prompt lists the allowed words; the code must not trust that it
+    obeyed. An off-vocabulary word (`high`, `easy`) used to crash the merge
+    inside `findings.priority_score` -- one bad answer, no report. It is a
+    contract violation here, at the parse boundary, so the caller can record
+    the task as failed and keep the finding's baseline values.
+    """
+    word = (value or "").strip().lower().split()
+    word = word[0].strip(".,[]") if word else ""
+    if word not in vocabulary:
+        raise EnrichmentContractError(
+            "%s must be one of %s, got %r" % (label, ", ".join(vocabulary), word)
+        )
+    return word
+
+
 def parse_deep_enrichment_response(text: str) -> Dict[str, Any]:
     """Parse the deep-analysis response into finding fields.
 
@@ -572,9 +596,9 @@ def parse_deep_enrichment_response(text: str) -> Dict[str, Any]:
         value = blocks[label]
         out[key] = _to_list(value) if key in _LIST_KEYS else value
 
-    out["exploitability"] = out["exploitability"].strip().lower().split()[0].strip(".,[]")
-    out["remediationComplexity"] = (
-        out["remediationComplexity"].strip().lower().split()[0].strip(".,[]")
+    out["exploitability"] = _vocab_word("EXPLOITABILITY", out["exploitability"], EXPLOITABILITIES)
+    out["remediationComplexity"] = _vocab_word(
+        "REMEDIATION_COMPLEXITY", out["remediationComplexity"], REMEDIATION_COMPLEXITIES
     )
 
     if blocks.get("SEVERITY_ADJUSTMENT"):
@@ -623,9 +647,11 @@ def parse_batch_enrichment_response(text: str) -> Dict[str, Any]:
         value = blocks[label]
         out[key] = _to_list(value) if key in _LIST_KEYS else value
 
-    out["exploitability"] = out["exploitability"].strip().lower().split()[0].strip(".,[]")
-    out["remediationComplexity"] = (
-        out["remediationComplexity"].strip().lower().split()[0].strip(".,[]")
+    out["exploitability"] = _vocab_word(
+        "COMMON_EXPLOITABILITY", out["exploitability"], EXPLOITABILITIES
+    )
+    out["remediationComplexity"] = _vocab_word(
+        "COMMON_REMEDIATION_COMPLEXITY", out["remediationComplexity"], REMEDIATION_COMPLEXITIES
     )
     if blocks.get("BATCH_SUMMARY"):
         out["batchSummary"] = blocks["BATCH_SUMMARY"].strip()

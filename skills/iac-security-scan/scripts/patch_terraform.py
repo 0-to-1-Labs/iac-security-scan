@@ -421,14 +421,102 @@ def load_terraform_resources(root: str) -> Tuple[List[TerraformResource], Dict[s
 # ===========================================================================
 
 
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*\"?([A-Za-z_][A-Za-z0-9_-]*)\"?\s*$")
+
+
+def _skip_string(line: str, i: int) -> int:
+    """Index just past the double-quoted string that opens at ``line[i]``.
+
+    Handles backslash escapes and ``${ ... }`` / ``%{ ... }`` template
+    interpolation, which may itself contain nested strings and braces. An
+    unterminated string runs to end of line (HCL strings do not span lines).
+    """
+    n = len(line)
+    i += 1  # opening quote
+    depth = 0  # interpolation nesting
+    while i < n:
+        ch = line[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if depth == 0 and ch == '"':
+            return i + 1
+        if ch in "$%" and line.startswith("{", i + 1):
+            depth += 1
+            i += 2
+            continue
+        if depth and ch == "}":
+            depth -= 1
+            i += 1
+            continue
+        if depth and ch == '"':
+            i = _skip_string(line, i)
+            continue
+        i += 1
+    return n
+
+
+def _mask_structure(text: str) -> List[str]:
+    """The lines of ``text`` with string literals, comments and heredoc bodies
+    blanked out, so that brace counting only ever sees *structural* braces.
+
+    A ``}`` inside ``Note = "}"``, a ``{`` inside a JSON heredoc, or a brace in
+    a ``# comment`` used to shift the depth counter and put a second copy of an
+    attribute inside the block -- HCL Terraform then rejects ("Attribute
+    redefined"). Attribute names and the ``=`` / ``{`` that follow them survive
+    masking, so the callers' patterns still match on the masked line.
+    """
+    out: List[str] = []
+    heredoc: Optional[str] = None
+    in_block_comment = False
+    for line in text.split("\n"):
+        if heredoc is not None:
+            out.append("")
+            if line.strip() == heredoc:
+                heredoc = None
+            continue
+        buf: List[str] = []
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
+            if in_block_comment:
+                end = line.find("*/", i)
+                if end == -1:
+                    break
+                in_block_comment = False
+                i = end + 2
+                continue
+            if ch == "#" or line.startswith("//", i):
+                break
+            if line.startswith("/*", i):
+                in_block_comment = True
+                i += 2
+                continue
+            if ch == '"':
+                i = _skip_string(line, i)
+                buf.append('""')
+                continue
+            m = _HEREDOC_OPEN_RE.match(line, i)
+            if m:
+                heredoc = m.group(1)
+                break
+            buf.append(ch)
+            i += 1
+        out.append("".join(buf))
+    return out
+
+
 def _block_top_level_attr_line(resource: TerraformResource, attr: str) -> Optional[int]:
     """Find the file line (1-based) of a *top-level* `attr = ...` in the block.
 
     Brace-depth aware, so `retention_in_days` inside a nested `dynamic` block is
     not mistaken for the resource's own attribute. This is the kind of thing
-    infrabot's regex parser got wrong.
+    infrabot's regex parser got wrong. Depth is counted on the masked lines
+    (`_mask_structure`), so braces inside strings, comments and heredocs do not
+    move it.
     """
-    lines = resource.rawContent.split("\n")
+    lines = _mask_structure(resource.rawContent)
     depth = 0
     pattern = re.compile(r"^\s*" + re.escape(attr) + r"\s*=")
     for offset, line in enumerate(lines):
@@ -451,9 +539,9 @@ def _top_level_block_span(
     """(startLine, endLine) of a top-level `name { ... }` block, 1-based inclusive.
 
     Brace-depth aware, so a `redirect` inside a nested `dynamic` block is not
-    mistaken for the resource's own `redirect` block.
+    mistaken for the resource's own `redirect` block. Counted on masked lines.
     """
-    lines = resource.rawContent.split("\n")
+    lines = _mask_structure(resource.rawContent)
     depth = 0
     pattern = re.compile(r"^\s*" + re.escape(name) + r"\s*\{")
     block_start: Optional[int] = None
@@ -496,7 +584,7 @@ def _nested_attr_line(
     span = _top_level_block_span(resource, block)
     if span is None:
         return None
-    lines = resource.rawContent.split("\n")
+    lines = _mask_structure(resource.rawContent)
     pattern = re.compile(r"^\s*" + re.escape(attr) + r"\s*=")
     depth = 0
     for line_no in range(span[0], span[1] + 1):
@@ -913,11 +1001,15 @@ def apply_changes_to_lines(
     # Two rules can prescribe the identical edit (CKV_AWS_2, CKV2_AWS_20 and
     # CKV_AWS_103 are all fixed by the same HTTP->HTTPS redirect). Splicing the
     # same span twice corrupts the file, so identical edits collapse to one.
+    # The key is the PHYSICAL block, not the address: a `count`/`for_each`
+    # resource expands to `name[0]`, `name[1]`, ... that all share one block,
+    # and one insertion per instance is a duplicate attribute Terraform rejects.
     deduped: List[PatchChange] = []
     seen_edits: set = set()
     for change in changes:
-        key = (change.targetAddress, change.kind, change.path, change.newValue,
-               tuple(change.body))
+        target = resources_by_address.get(change.targetAddress)
+        where = (target.file, target.startLine) if target else (change.targetAddress,)
+        key = (where, change.kind, change.path, change.newValue, tuple(change.body))
         if key in seen_edits:
             continue
         seen_edits.add(key)
@@ -965,7 +1057,14 @@ def apply_changes_to_lines(
                 )
             continue
 
-        if change.type == "modify":
+        if change.type == "modify" or (
+            change.kind == "attribute"
+            and _block_top_level_attr_line(resource, change.path) is not None
+        ):
+            # An attribute that already exists at the top level is UPDATED in
+            # place, never added a second time -- "Attribute redefined" is a
+            # hard Terraform error. This holds even when the change was built
+            # as an `add`, so a stale change can never duplicate an attribute.
             line_no = _block_top_level_attr_line(resource, change.path)
             if line_no is None:
                 continue
@@ -1015,35 +1114,60 @@ def _terraform_available() -> bool:
     return shutil.which("terraform") is not None
 
 
-def terraform_fmt_stdin(content: str) -> Optional[str]:
-    """`terraform fmt -` : format HCL from stdin. None if terraform is absent/errors."""
+def _run_terraform_fmt(content: str) -> Tuple[Optional[str], Optional[str]]:
+    """`terraform fmt -` on ``content`` -> ``(formatted, error)``.
+
+    ``(None, None)`` when terraform is absent or could not be run (no opinion).
+    ``(None, "<stderr>")`` when terraform ran and REJECTED the input -- that is
+    a parse error in the HCL, and every caller must treat it as one, never as
+    "fmt unavailable". ``(text, None)`` on success.
+    """
     if not _terraform_available():
-        return None
+        return None, None
     try:
         proc = subprocess.run(
             ["terraform", "fmt", "-"], input=content, capture_output=True,
             text=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return None, None
     if proc.returncode != 0:
-        return None
-    return proc.stdout
+        err = (proc.stderr or proc.stdout or "terraform fmt failed").strip()
+        return None, err[:600]
+    return proc.stdout, None
+
+
+def terraform_fmt_stdin(content: str) -> Optional[str]:
+    """`terraform fmt -` : format HCL from stdin. None if terraform is absent/errors."""
+    return _run_terraform_fmt(content)[0]
+
+
+def fmt_normalize(original: str, patched: str) -> Tuple[str, Optional[str]]:
+    """``(text, syntax_error)``: the patched content run through `terraform fmt`.
+
+    Formatting is applied ONLY when the original was already fmt-clean;
+    otherwise fmt would "fix" pre-existing formatting drift elsewhere in the
+    file and the diff would carry hunks that have nothing to do with the
+    security fix. A remediation diff that also reformats 40 unrelated lines
+    does not get merged.
+
+    ``syntax_error`` is set when terraform is present and rejects the PATCHED
+    text. A patch that does not parse must never be auto-applied, so callers
+    use it as a blocker; they do not swallow it.
+    """
+    formatted_original, _ = _run_terraform_fmt(original)
+    formatted_patched, error = _run_terraform_fmt(patched)
+    if error:
+        return patched, "patched file does not parse (terraform fmt): %s" % error
+    if formatted_original is None or formatted_original != original:
+        return patched, None
+    return (formatted_patched if formatted_patched is not None else patched), None
 
 
 def normalize_with_fmt(original: str, patched: str) -> str:
-    """Run the patched content through `terraform fmt`, but ONLY when the original
-    was already fmt-clean.
-
-    Otherwise fmt would "fix" pre-existing formatting drift elsewhere in the file
-    and the diff would carry hunks that have nothing to do with the security fix.
-    A remediation diff that also reformats 40 unrelated lines does not get merged.
-    """
-    formatted_original = terraform_fmt_stdin(original)
-    if formatted_original is None or formatted_original != original:
-        return patched
-    formatted_patched = terraform_fmt_stdin(patched)
-    return formatted_patched if formatted_patched is not None else patched
+    """`fmt_normalize` without the error channel (kept for callers that only
+    want the text; `llm_fix` marks its output diff-only regardless)."""
+    return fmt_normalize(original, patched)[0]
 
 
 def create_unified_diff(file: str, original: str, patched: str, context: int = 3) -> str:
@@ -1125,24 +1249,39 @@ def generate_security_patches(
             parsed = {}
     existing |= {d.get("address", "") for d in parsed.get("data_sources", [])}
 
-    # group findings by the resource they land on
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    # Checkov may report a `count`/`for_each` resource by its bare address
+    # (`aws_x.c`) while tfparse expands it to `aws_x.c[0]`, `aws_x.c[1]`. Join on
+    # the bare address as a fallback so the finding is not silently unmatched.
+    by_base: Dict[str, TerraformResource] = {}
+    for r in resources:
+        by_base.setdefault(_base_address(r.address), r)
+
+    # group findings by the PHYSICAL block they land on. Instances of one
+    # `count`/`for_each` resource share a block; one patch covers all of them
+    # and claims every instance's finding, instead of one insertion per instance
+    # (a duplicate attribute, which Terraform rejects).
+    grouped: Dict[Tuple[str, int], Tuple[TerraformResource, List[Dict[str, Any]]]] = {}
     for finding in findings:
         loc = finding.get("location") or {}
         address = loc.get("resourceAddress")
-        if not address or address not in by_address:
+        if not address:
             continue
-        grouped.setdefault(address, []).append(finding)
+        resource = by_address.get(address) or by_base.get(_base_address(address))
+        if resource is None:
+            continue
+        block_key = (resource.file, resource.startLine)
+        grouped.setdefault(block_key, (resource, []))[1].append(finding)
 
     # ---- build changes per resource, then bucket them by FILE, because a
     # single file's patch must be applied as one coherent text edit.
     changes_by_file: Dict[str, List[PatchChange]] = {}
     meta_by_file: Dict[str, List[Tuple[TerraformResource, List[Dict[str, Any]], List[PatchChange]]]] = {}
 
-    for address, res_findings in grouped.items():
-        resource = by_address[address]
-        changes = generate_changes_for_resource(
-            resource, res_findings, catalog, resources, existing
+    for resource, res_findings in grouped.values():
+        changes = _dedupe_changes(
+            generate_changes_for_resource(
+                resource, res_findings, catalog, resources, existing
+            )
         )
         if not changes:
             continue
@@ -1161,8 +1300,9 @@ def generate_security_patches(
                 original.split("\n"), changes, by_address
             )
             patched = "\n".join(patched_lines)
+            syntax_error: Optional[str] = None
             if use_fmt:
-                patched = normalize_with_fmt(original, patched)
+                patched, syntax_error = fmt_normalize(original, patched)
             if patched == original:
                 continue
 
@@ -1181,7 +1321,9 @@ def generate_security_patches(
             rule_auto = bool(rule_ids) and all(
                 (catalog.get(rid) or {}).get("autoApplicable", False) for rid in rule_ids
             )
-            blocker = auto_apply_blocker(changes)
+            # A patch terraform cannot parse is diff-only, whatever the catalog
+            # says: the README promises every auto-applied fix survives `fmt`.
+            blocker = auto_apply_blocker(changes) or syntax_error
 
             patches.append(
                 TerraformPatch(
@@ -1194,12 +1336,39 @@ def generate_security_patches(
                     findingIds=sorted({f.get("id", "") for f in fixed}),
                     ruleIds=rule_ids,
                     severity=_highest_severity(severities),
-                    autoApplicable=is_auto_applicable(changes, rule_auto),
+                    autoApplicable=is_auto_applicable(changes, rule_auto) and not syntax_error,
                     autoApplyBlockedBy=blocker,
                 )
             )
 
     return patches
+
+
+_INDEX_SUFFIX_RE = re.compile(r"\[[^\]]*\]$")
+
+
+def _base_address(address: str) -> str:
+    """`aws_x.c[0]` / `aws_x.c["k"]` -> `aws_x.c`."""
+    return _INDEX_SUFFIX_RE.sub("", address or "")
+
+
+def _dedupe_changes(changes: Sequence[PatchChange]) -> List[PatchChange]:
+    """Collapse identical edits from several findings on one block into one
+    change that claims all of their finding ids (the `count`/`for_each` case)."""
+    out: List[PatchChange] = []
+    index: Dict[Tuple[Any, ...], PatchChange] = {}
+    for change in changes:
+        key = (change.targetAddress, change.kind, change.path, change.newValue,
+               tuple(change.body))
+        kept = index.get(key)
+        if kept is None:
+            index[key] = change
+            out.append(change)
+            continue
+        for fid in change.findingIds:
+            if fid not in kept.findingIds:
+                kept.findingIds.append(fid)
+    return out
 
 
 def _group_by_file(
@@ -1236,11 +1405,14 @@ def _patched_content(
     patches: Sequence[TerraformPatch],
     by_address: Dict[str, TerraformResource],
     use_fmt: bool,
-) -> Tuple[str, str, List[PatchChange]]:
-    """(original, patched, changes) for one file -- the SINGLE source of truth.
+) -> Tuple[str, str, List[PatchChange], Optional[str]]:
+    """(original, patched, changes, syntax_error) for one file -- the SINGLE
+    source of truth.
 
     Both the emitted patch set and the on-disk apply go through here, so the
     diff we hand a user and the edit we would make ourselves cannot drift apart.
+    ``syntax_error`` is set when terraform rejects the patched text; the apply
+    path refuses to write it and the patch-set path marks it diff-only.
     """
     with open(os.path.join(root, file), encoding="utf-8") as fh:
         original = fh.read()
@@ -1248,9 +1420,10 @@ def _patched_content(
     for patch in patches:
         changes.extend(patch.changes)
     patched = "\n".join(apply_changes_to_lines(original.split("\n"), changes, by_address))
+    syntax_error: Optional[str] = None
     if use_fmt:
-        patched = normalize_with_fmt(original, patched)
-    return original, patched, changes
+        patched, syntax_error = fmt_normalize(original, patched)
+    return original, patched, changes, syntax_error
 
 
 def generate_file_patches(
@@ -1269,7 +1442,7 @@ def generate_file_patches(
     out: List[FilePatch] = []
 
     for file, file_patches in _group_by_file(patches, only_auto_applicable).items():
-        original, patched, changes = _patched_content(
+        original, patched, changes, syntax_error = _patched_content(
             root, file, file_patches, by_address, use_fmt
         )
         if patched == original:
@@ -1282,7 +1455,8 @@ def generate_file_patches(
                 ruleIds=sorted({r for p in file_patches for r in p.ruleIds}),
                 findingIds=sorted({f for p in file_patches for f in p.findingIds}),
                 patchCount=len(file_patches),
-                autoApplicable=all(p.autoApplicable for p in file_patches),
+                autoApplicable=all(p.autoApplicable for p in file_patches)
+                and not syntax_error,
             )
         )
 
@@ -1321,9 +1495,15 @@ def apply_patches_to_tree(
     for file, file_patches in by_file.items():
         abs_path = os.path.join(root, file)
         try:
-            original, patched, _ = _patched_content(
+            original, patched, _, syntax_error = _patched_content(
                 root, file, file_patches, by_address, use_fmt
             )
+            if syntax_error:
+                # Never write HCL that terraform rejects. Surfaced, not swallowed.
+                result.errors.append(f"Refusing to write {file}: {syntax_error}")
+                result.failedCount += len(file_patches)
+                result.success = False
+                continue
             if patched == original:
                 continue
             with open(abs_path, "w", encoding="utf-8") as fh:
@@ -1349,18 +1529,20 @@ def _git(root: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def generate_commit_message(patches: Sequence[TerraformPatch], applied: int, files: int) -> str:
+def generate_commit_message(
+    patches: Sequence[Any], applied: int, files: int, label: str = "Terraform"
+) -> str:
     """(terraform-patch.ts:1095) One commit per finding group -- a bad fix is one
-    `git revert` away."""
+    `git revert` away. ``label`` names the IaC format in the title."""
     critical = sum(1 for p in patches if p.severity == "critical")
     high = sum(1 for p in patches if p.severity == "high")
 
     if critical:
-        title = f"fix: apply {critical} critical security patches to Terraform"
+        title = f"fix: apply {critical} critical security patches to {label}"
     elif high:
-        title = f"fix: apply {high} high severity security patches to Terraform"
+        title = f"fix: apply {high} high severity security patches to {label}"
     else:
-        title = f"fix: apply {len(patches)} security patches to Terraform"
+        title = f"fix: apply {len(patches)} security patches to {label}"
 
     lines = [title, "", f"Applied {applied} patches across {files} files.", ""]
 
@@ -1389,8 +1571,14 @@ def create_patch_branch(
     patches: Sequence[TerraformPatch],
     resources: Sequence[TerraformResource],
     branch_name: Optional[str] = None,
+    use_fmt: bool = True,
 ) -> BranchCreationResult:
     """Apply auto-applicable patches on a NEW branch, never on a dirty tree.
+
+    ``root`` is the directory the patches were generated against (the module
+    directory). Every git call runs with ``-C root``, so a module that is a
+    subdirectory of its repository is handled correctly: files are read and
+    written under ``root`` and ``git add`` resolves the same relative paths.
 
     SPEC §6.3 rails, in order and all of them:
       1. refuse on a dirty tree -- no --force, no exceptions
@@ -1420,7 +1608,9 @@ def create_patch_branch(
         result.error = f"Could not create branch {branch}: {checkout.stderr.strip()}"
         return result
 
-    applied = apply_patches_to_tree(root, patches, resources, only_auto_applicable=True)
+    applied = apply_patches_to_tree(
+        root, patches, resources, only_auto_applicable=True, use_fmt=use_fmt
+    )
     if not applied.success or not applied.modifiedFiles:
         result.error = (
             "No auto-applicable patches to commit. "

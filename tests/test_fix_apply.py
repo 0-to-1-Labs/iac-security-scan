@@ -38,6 +38,24 @@ HAS_CHECKOV = shutil.which("checkov") is not None
 HAS_TFPARSE = pt._terraform_available() or True  # parse works without terraform
 
 
+#: The real validator, captured before the autouse stub below replaces it.
+_REAL_VALIDATE = fx.terraform_validate_module
+
+
+@pytest.fixture(autouse=True)
+def _no_network_validate(monkeypatch):
+    """`terraform validate` needs `terraform init`, which downloads providers.
+    Keep the suite offline: stand in a validator that reports "unknown". The
+    validate-specific tests override this with their own stub."""
+    monkeypatch.setattr(
+        fx,
+        "terraform_validate_module",
+        lambda module_dir, plugin_cache_dir=None: {
+            "available": False, "valid": None, "error": "stubbed in tests",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -234,6 +252,218 @@ class TestBranch:
         result = fx.run_fix(root, TWO_GROUP_FINDINGS)
         assert result.refused is True
         assert "detached" in result.error.lower()
+
+
+# ===========================================================================
+# Same directory in, same directory out (ISS-01) -- and back to the branch
+# ===========================================================================
+
+
+DECOY_TF = """locals {
+  x = 1
+}
+"""
+
+
+class TestModuleInASubdirectory:
+    """The bug: patches were generated against the module dir but applied
+    against the git toplevel, so `repo/infra/main.tf`'s fix landed in
+    `repo/main.tf` (corrupting it) and was reported as a success."""
+
+    def _repo(self, tmp_path):
+        return make_repo(tmp_path, {"infra/main.tf": LOGS_TF, "main.tf": DECOY_TF})
+
+    def test_fix_lands_in_the_module_file_not_the_decoy(self, tmp_path):
+        root = self._repo(tmp_path)
+        module = os.path.join(root, "infra")
+        findings = [finding("CKV_AWS_338", "aws_cloudwatch_log_group.app", "main.tf")]
+
+        result = fx.run_fix(module, findings)
+
+        assert result.success and result.appliedCount == 1, result.error
+        assert result.moduleDir == module
+        assert result.repoRoot == root
+        branch = result.branch
+        patched = _git(root, "show", f"{branch}:infra/main.tf").stdout
+        assert "retention_in_days = 365" in patched
+        decoy = _git(root, "show", f"{branch}:main.tf").stdout
+        assert decoy == DECOY_TF, "the decoy at the repo root must be untouched"
+        touched = _git(root, "show", "--name-only", "--format=", branch).stdout.split()
+        assert touched == ["infra/main.tf"]
+
+    def test_returns_to_the_original_branch(self, tmp_path):
+        root = self._repo(tmp_path)
+        module = os.path.join(root, "infra")
+        result = fx.run_fix(
+            module, [finding("CKV_AWS_338", "aws_cloudwatch_log_group.app", "main.tf")]
+        )
+        assert result.branch
+        assert result.returnedToOriginalBranch is True
+        assert _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+        # the working tree on main still has the ORIGINAL file
+        with open(os.path.join(module, "main.tf"), encoding="utf-8") as fh:
+            assert fh.read() == LOGS_TF
+        assert "back on `main`" in fx.format_fix_report(result)
+
+    def test_no_same_named_file_at_root_still_works(self, tmp_path):
+        """Before the fix this path failed with `No such file`."""
+        root = make_repo(tmp_path, {"infra/main.tf": LOGS_TF, "README.md": "x\n"})
+        result = fx.run_fix(
+            os.path.join(root, "infra"),
+            [finding("CKV_AWS_338", "aws_cloudwatch_log_group.app", "main.tf")],
+        )
+        assert result.success and result.appliedCount == 1, result.error
+        assert not result.skipped
+
+    def test_unchanged_target_is_never_reported_as_applied(self, tmp_path, monkeypatch):
+        """If the patcher writes nothing git can see, the group fails loudly."""
+        root = two_group_repo(tmp_path)
+
+        real_apply = fx.TERRAFORM_BACKEND.apply
+
+        def lying_apply(path, patches, resources, use_fmt):
+            res = real_apply(path, patches, resources, use_fmt)
+            # undo the write but keep claiming success
+            _git(path, "checkout", "--", *res.modifiedFiles)
+            return res
+
+        monkeypatch.setattr(fx.TERRAFORM_BACKEND, "apply", lying_apply)
+        result = fx.run_fix(root, TWO_GROUP_FINDINGS)
+        assert result.appliedCount == 0
+        assert result.branch is None
+        assert all(s.reasonCode == fx.SKIP_APPLY_FAILED for s in result.skipped)
+        assert any("unchanged" in s.reason for s in result.skipped)
+        assert _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+
+
+# ===========================================================================
+# terraform validate before commit
+# ===========================================================================
+
+
+class TestTerraformValidateGate:
+    def test_validate_failure_reverts_and_skips(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            fx, "terraform_validate_module",
+            lambda module_dir, plugin_cache_dir=None: {
+                "available": True, "valid": False, "error": "Unsupported argument",
+            },
+        )
+        root = two_group_repo(tmp_path)
+        result = fx.run_fix(root, TWO_GROUP_FINDINGS)
+        assert result.success
+        assert result.appliedCount == 0
+        assert result.branch is None
+        reasons = [s.reason for s in result.skipped]
+        assert all("terraform validate rejected" in r for r in reasons)
+        # nothing written, nothing committed, back on main
+        assert _git(root, "status", "--porcelain").stdout.strip() == ""
+        assert "iac-security-scan/fix-" not in _git(root, "branch").stdout
+        with open(os.path.join(root, "logs.tf"), encoding="utf-8") as fh:
+            assert fh.read() == LOGS_TF
+
+    def test_validate_pass_is_recorded(self, tmp_path, monkeypatch):
+        calls = []
+
+        def ok(module_dir, plugin_cache_dir=None):
+            calls.append(module_dir)
+            return {"available": True, "valid": True, "error": None}
+
+        monkeypatch.setattr(fx, "terraform_validate_module", ok)
+        root = two_group_repo(tmp_path)
+        result = fx.run_fix(root, TWO_GROUP_FINDINGS)
+        assert result.appliedCount == 2
+        assert all(g.validation == "passed" for g in result.applied)
+        assert calls and all(c == root for c in calls)
+
+    def test_no_validate_flag_skips_it(self, tmp_path, monkeypatch):
+        def boom(module_dir, plugin_cache_dir=None):
+            raise AssertionError("validate must not run with validate=False")
+
+        monkeypatch.setattr(fx, "terraform_validate_module", boom)
+        root = two_group_repo(tmp_path)
+        result = fx.run_fix(root, TWO_GROUP_FINDINGS, validate=False)
+        assert result.appliedCount == 2
+        assert all("skipped" in (g.validation or "") for g in result.applied)
+
+    def test_real_validator_runs_on_a_copy(self, tmp_path):
+        """The real function copies the module and never touches it. Without
+        the network `init` fails and the verdict is `None`, never False."""
+        if not pt._terraform_available():
+            pytest.skip("terraform not installed")
+        module = str(tmp_path / "m")
+        os.makedirs(module)
+        with open(os.path.join(module, "main.tf"), "w", encoding="utf-8") as fh:
+            fh.write('variable "x" {\n  default = 1\n}\n')
+        before = sorted(os.listdir(module))
+        verdict = _REAL_VALIDATE(module)
+        assert verdict["available"] is True
+        assert verdict["valid"] in (True, None)
+        assert sorted(os.listdir(module)) == before, "the module must not gain .terraform"
+
+
+# ===========================================================================
+# CloudFormation --fix (ISS-10)
+# ===========================================================================
+
+
+SNS_TEMPLATE = """AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  Alerts:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: alerts
+"""
+
+
+class TestCloudFormationFix:
+    @pytest.fixture(autouse=True)
+    def _needs_cfn_lint(self):
+        import parse_iac
+
+        if not parse_iac.CFNLINT_AVAILABLE:
+            pytest.skip("cfn-lint not installed")
+
+    def test_cfn_module_in_a_subdirectory(self, tmp_path):
+        root = make_repo(
+            tmp_path, {"stacks/template.yaml": SNS_TEMPLATE, "template.yaml": SNS_TEMPLATE}
+        )
+        module = os.path.join(root, "stacks")
+        findings = [
+            {
+                "id": "f-CKV_AWS_26-Alerts",
+                "ruleId": "CKV_AWS_26",
+                "title": "SNS topic not encrypted",
+                "severity": "high",
+                "location": {
+                    "file": "template.yaml",
+                    "startLine": 3,
+                    "endLine": 6,
+                    "resourceAddress": "AWS::SNS::Topic.Alerts",
+                    "resourceType": "AWS::SNS::Topic",
+                    "service": "SNS",
+                },
+            }
+        ]
+        result = fx.run_fix(module, findings, iac_format="cloudformation")
+        assert result.success and result.appliedCount == 1, result.error
+        assert result.iacFormat == "cloudformation"
+        patched = _git(root, "show", f"{result.branch}:stacks/template.yaml").stdout
+        assert "KmsMasterKeyId" in patched
+        assert _git(root, "show", f"{result.branch}:template.yaml").stdout == SNS_TEMPLATE
+        assert "CloudFormation" in _git(root, "log", "-1", "--format=%s", result.branch).stdout
+        assert _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+
+    def test_format_is_detected_from_the_directory(self, tmp_path):
+        root = make_repo(tmp_path, {"template.yaml": SNS_TEMPLATE})
+        result = fx.run_fix(root, [], dry_run=True)
+        assert result.iacFormat == "cloudformation"
+
+    def test_findings_only_format_is_refused(self, tmp_path):
+        root = make_repo(tmp_path, {"deploy.yaml": "apiVersion: v1\nkind: Pod\n"})
+        result = fx.run_fix(root, [], iac_format="kubernetes")
+        assert result.success is False
+        assert "findings-only" in (result.error or "")
 
 
 # ===========================================================================
@@ -445,7 +675,7 @@ class TestCli:
         findings_path = os.path.join(str(tmp_path), "f.json")
         with open(findings_path, "w") as fh:
             json.dump({"findings": TWO_GROUP_FINDINGS}, fh)
-        code = fx.main([root, "--findings", findings_path])
+        code = fx.main([root, "--findings", findings_path, "--no-validate"])
         assert code == 0
 
     def test_exit_2_on_missing_dir(self):

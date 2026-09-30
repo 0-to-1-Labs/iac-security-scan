@@ -18,7 +18,7 @@ So:
   * ``resourceArn`` / ``accountId`` / ``region`` are **optional and live-only** --
     they are ``None`` in every static scan and only populated under ``--live``.
 
-Severity governance (the non-negotiable, see IMPLEMENTATION_PLAN §1.2/§3):
+Severity governance (the non-negotiable):
 
     data/rule-severity.json is static, checked-in, human-reviewed data.
     The model NEVER generates a baseline severity at runtime.
@@ -180,7 +180,7 @@ def is_quick_win(severity: str, remediation_complexity: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Severity resolution chain (IMPLEMENTATION_PLAN §3)
+# Severity resolution chain
 #
 #   data/rule-severity.json  (checked-in seed, human-reviewed)
 #     -> LLM adjustment      (+/-1 level max, requires severityAdjustedFrom + reason)
