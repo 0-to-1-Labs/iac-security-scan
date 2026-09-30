@@ -386,6 +386,53 @@ def test_partial_enrichment_is_a_contract_error_not_a_half_finding():
     assert "ATTACK_SCENARIO" in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    "label,bad",
+    [("EXPLOITABILITY: moderate", "EXPLOITABILITY: high"),
+     ("REMEDIATION_COMPLEXITY: simple", "REMEDIATION_COMPLEXITY: easy")],
+)
+def test_off_vocabulary_word_is_a_contract_error_at_the_parser(label, bad):
+    """ISS-11: `high` / `easy` used to pass the parser and crash the merge in
+    priority_score. It is refused at the boundary instead."""
+    with pytest.raises(EnrichmentContractError) as exc:
+        parse_deep_enrichment_response(GOOD_RESPONSE.replace(label, bad))
+    assert "must be one of" in str(exc.value)
+
+
+def test_apply_enrichment_refuses_an_off_vocabulary_value(sevmap):
+    result = merge([ckv()], [], severity_map=sevmap)
+    finding = result["findings"][0]
+    baseline = finding["exploitability"]
+    apply_enrichment(finding, {"exploitability": "high", "businessImpact": "bad"}, sevmap)
+    assert finding["exploitability"] == baseline
+    assert finding["businessImpact"] == "bad"
+    assert any("exploitability" in r for r in finding["enrichmentRejected"])
+
+
+def test_one_malformed_enrichment_payload_does_not_drop_the_report(sevmap, monkeypatch):
+    """A payload that raises inside apply_enrichment is recorded on the
+    finding; the merge completes and every Checkov finding survives."""
+    import merge_findings as mf
+
+    findings = [ckv(), ckv(rule_id="CKV_AWS_145")]
+    target_id = merge([ckv()], [], severity_map=sevmap)["findings"][0]["id"]
+
+    real = mf.apply_enrichment
+
+    def brittle(finding, payload, *args, **kwargs):
+        if finding["id"] == target_id:
+            raise RuntimeError("model wrote garbage")
+        return real(finding, payload, *args, **kwargs)
+
+    monkeypatch.setattr(mf, "apply_enrichment", brittle)
+    result = mf.merge(findings, [], severity_map=sevmap,
+                      enrichments={target_id: {"businessImpact": "x"}})
+    assert len(result["findings"]) == 2
+    bad = [f for f in result["findings"] if f["id"] == target_id][0]
+    assert "model wrote garbage" in bad["enrichmentError"]
+    assert bad.get("priorityScore") is not None
+
+
 def test_enrichment_populates_all_seven_fields_on_the_finding(sevmap):
     result = merge([ckv()], [], severity_map=sevmap)
     finding = result["findings"][0]

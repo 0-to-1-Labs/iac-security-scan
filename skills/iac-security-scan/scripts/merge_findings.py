@@ -9,7 +9,7 @@ enrichment fields into it. The user sees ONE finding carrying the best of both,
 with ``source: ["checkov", "llm"]``, because that concurrence is itself a
 confidence signal.
 
-Pre-flight (IMPLEMENTATION_PLAN §1.3) confirmed the key joins natively:
+Pre-flight against the fixture corpus confirmed the key joins natively:
 
     checkov.resource       == "aws_athena_workgroup.main"
     tfparse.__tfmeta.path  == "aws_athena_workgroup.main"     <- byte-identical
@@ -72,6 +72,8 @@ from enrich_prompts import (  # noqa: E402
     tier_findings,
 )
 from findings import (  # noqa: E402
+    EXPLOITABILITIES,
+    REMEDIATION_COMPLEXITIES,
     SEVERITIES,
     UNMAPPED,
     SeverityAdjustmentError,
@@ -675,7 +677,7 @@ def _new_record(finding: Dict[str, Any], source: List[str]) -> Dict[str, Any]:
 
 def _seed_severity(finding: Dict[str, Any], severity_map: SeverityMap) -> Dict[str, Any]:
     """Resolve the baseline severity from the checked-in map. The ONLY sanctioned
-    source of a baseline severity (IMPLEMENTATION_PLAN §3)."""
+    source of a baseline severity."""
     seed = severity_map.resolve(finding.get("ruleId") or "")
     finding["severity"] = seed.severity
     finding["severitySource"] = seed.source
@@ -726,6 +728,14 @@ REQUIRED_ENRICHMENT_FIELDS = (
 )
 
 
+#: Enrichable fields whose values come from a closed vocabulary. Anything else
+#: the model writes into them is rejected, not scored.
+_ENRICHABLE_VOCAB = {
+    "exploitability": EXPLOITABILITIES,
+    "remediationComplexity": REMEDIATION_COMPLEXITIES,
+}
+
+
 def apply_enrichment(
     finding: Dict[str, Any],
     payload: Dict[str, Any],
@@ -748,6 +758,15 @@ def apply_enrichment(
     """
     for key in ENRICHABLE_FIELDS:
         if key in payload and payload[key] not in (None, "", []):
+            vocabulary = _ENRICHABLE_VOCAB.get(key)
+            if vocabulary is not None and payload[key] not in vocabulary:
+                # An off-vocabulary word would crash `priority_score` and take
+                # the whole report with it. Refuse the field, keep the baseline,
+                # and say so on the finding.
+                finding.setdefault("enrichmentRejected", []).append(
+                    "%s=%r is not one of %s" % (key, payload[key], ", ".join(vocabulary))
+                )
+                continue
             finding[key] = payload[key]
 
     proposed = payload.get("_severityAdjustment") or payload.get("severityAdjustment")
@@ -936,9 +955,19 @@ def merge(
     # --- Enrichment payloads, through the trust boundary ---
     for finding in findings_list:
         payload = (enrichments or {}).get(finding["id"])
-        if payload:
+        if not payload:
+            _rescore(finding)
+            continue
+        try:
             apply_enrichment(finding, payload, severity_map, suppression_log, injection_log)
-        else:
+        except Exception as exc:  # noqa: BLE001 -- a bad payload is data, not a crash
+            # One malformed payload must never drop the report (that is also a
+            # cheap denial-of-service lever for an injected comment). Record
+            # the failure on the finding and keep its baseline values.
+            finding["enrichmentError"] = str(exc)
+            print(
+                "enrichment REJECTED for %s: %s" % (finding["id"], exc), file=sys.stderr
+            )
             _rescore(finding)
 
     findings_list.sort(
