@@ -8,6 +8,5 @@
   "license": "MIT",
   "keywords": ["terraform", "security", "iac", "nist-800-53", "fedramp", "checkov", "remediation", "sarif"],
   "commands": "./commands",
-  "skills": "./skills",
-  "agents": "./agents"
+  "skills": "./skills"
 }
