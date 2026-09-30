@@ -1,16 +1,4 @@
 {
-  "_comment": [
-    "OPT-IN registration for the terraform-apply security gate. This file is",
-    "NOT loaded by Claude Code -- it is named hooks.json.example on purpose so",
-    "that installing the plugin arms NOTHING. See hooks/README.md to enable.",
-    "",
-    "Two independent gates must both be turned on before the hook ever blocks:",
-    "  (1) register it (this snippet), and",
-    "  (2) create .claude/iac-security-scan.local.md with `apply_gate: block`",
-    "      (or warn/ask). Without the flag file the hook no-ops instantly.",
-    "",
-    "The gate FAILS OPEN: if the scan errors or times out, the apply proceeds."
-  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -18,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/apply_gate.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/apply_gate.py",
             "timeout": 150
           }
         ]

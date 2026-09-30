@@ -11,19 +11,22 @@ whole plugin uninstalled on day one:
    wired in ``.claude-plugin/plugin.json`` and there is deliberately no
    auto-discovered ``hooks/hooks.json``. Two independent gates must BOTH be
    off-by-default before this ever runs:
-     (a) the user has to register it (copy ``hooks/hooks.json.example`` into
-         their own ``.claude/settings.json``), and
+     (a) the user has to register it (copy the snippet from
+         ``hooks/hooks.json.example`` into their own ``.claude/settings.json``),
+         and
      (b) even once registered, the FIRST thing ``decide()`` does is check an
          explicit local enable flag and no-op instantly if it is absent.
    A plugin that can block someone's ``terraform apply`` the moment they
    install it gets uninstalled the same minute. So it can't.
 
-2. IT FAILS OPEN. If the scanner errors, times out, cannot find checkov, or
-   this hook throws for any reason, the apply is ALLOWED, loudly, with an
-   explanation. A security tool that bricks ``terraform apply`` because it
-   crashed is strictly worse than one that occasionally waves a bad deploy
-   through. We choose the latter, on purpose. The deny path is reachable ONLY
-   when a scan actually ran and actually found a blocking finding.
+2. IT NEVER AUTO-APPROVES. This hook returns exactly two decisions: ``ask``
+   and ``deny``. A clean scan, a scan that could not run (checkov missing,
+   timeout, degraded parse), a command it could not parse, or a bug in this
+   file all resolve to ``ask`` -- the user sees their normal permission prompt
+   with the gate's verdict attached. ``deny`` is reachable ONLY when a scan
+   actually ran and actually found a finding at or above the floor in
+   ``block`` mode. There is no code path that returns ``allow``: a security
+   gate must never remove the one human checkpoint it was installed to add.
 
 Enablement (all local, never plugin.json):
 
@@ -35,6 +38,9 @@ Enablement (all local, never plugin.json):
   apply_gate_timeout: 120        # seconds; the scan is bounded
   ---
 
+  The file is looked up under ``$CLAUDE_PROJECT_DIR`` first (the project root
+  Claude Code exports to hooks), then under the session ``cwd``.
+
   Environment variables override the file (handy for CI):
     IAC_SECURITY_SCAN_APPLY_GATE           off | warn | ask | block
     IAC_SECURITY_SCAN_APPLY_GATE_SEVERITY  critical | high | medium | low
@@ -42,21 +48,23 @@ Enablement (all local, never plugin.json):
 
 Modes:
   off   -- disabled. Instant no-op. (This is the default when nothing is set.)
-  warn  -- allow the apply, but surface a loud warning listing the findings.
-  ask   -- ask the user to confirm before applying.
+  warn  -- ask, with a loud warning listing the findings in the prompt.
+  ask   -- ask the user to confirm before applying, findings listed.
   block -- deny the apply, with the findings and a clear bypass.
 
 The scan is deterministic and bounded: it runs the Checkov adapter on the
-TARGET directory only (honoring ``terraform -chdir=DIR``), seeds severities
-from the checked-in ``data/rule-severity.json`` map, and counts findings whose
-seeded severity is at or above the floor. No LLM, no network, no full-repo
-walk -- a PreToolUse hook has to be fast and it has to be predictable.
+TARGET directory only (honoring ``cd DIR && terraform apply`` and
+``terraform -chdir=DIR``), seeds severities from the checked-in
+``data/rule-severity.json`` map, and counts findings whose seeded severity is
+at or above the floor. No LLM, no network, no full-repo walk -- a PreToolUse
+hook has to be fast and it has to be predictable.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -76,8 +84,8 @@ if _SCRIPTS_DIR not in sys.path:
 
 # Severity ordering, most severe first. Kept local so this hook never fails to
 # LOAD just because the scanner package moved; findings.SeverityMap is imported
-# lazily inside the scan so an import error there fails OPEN rather than at
-# module import.
+# lazily inside the scan so an import error there resolves to `ask` rather
+# than crashing at module import.
 SEVERITY_ORDER: List[str] = ["critical", "high", "medium", "low", "informational"]
 
 VALID_MODES = ("off", "warn", "ask", "block")
@@ -90,9 +98,28 @@ CONFIG_RELPATH = os.path.join(".claude", "iac-security-scan.local.md")
 ENV_MODE = "IAC_SECURITY_SCAN_APPLY_GATE"
 ENV_FLOOR = "IAC_SECURITY_SCAN_APPLY_GATE_SEVERITY"
 ENV_TIMEOUT = "IAC_SECURITY_SCAN_APPLY_GATE_TIMEOUT"
+ENV_PROJECT_DIR = "CLAUDE_PROJECT_DIR"
 
-# The tools whose ``apply`` subcommand we gate. OpenTofu is a drop-in fork.
-APPLY_BINARIES = ("terraform", "tofu")
+# The tools whose ``apply`` subcommand we gate. OpenTofu is a drop-in fork;
+# terragrunt wraps both.
+APPLY_BINARIES = ("terraform", "tofu", "terragrunt")
+
+# Command words that merely wrap the real command: `env X=1 terraform apply`,
+# `time terraform apply`, `sudo terraform apply`.
+_WRAPPER_WORDS = ("env", "time", "nice", "sudo", "command", "exec", "nohup", "stdbuf")
+
+# Shells whose `-c` argument is itself a command line.
+_SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+
+# terragrunt tokens that sit between the binary and the subcommand.
+_TERRAGRUNT_PASS = ("run-all", "run", "--all", "--non-interactive")
+
+# Shell constructs this parser does not evaluate. When one of these appears in
+# a command that also mentions `apply` and an apply binary, the honest answer is
+# "cannot tell" -- and "cannot tell" is `ask`, never pass-through.
+_DYNAMIC_RE = re.compile(r"\$\(|`|\$\{?\w|\beval\b|\bxargs\b")
+_APPLY_WORD_RE = re.compile(r"\bapply\b")
+_BINARY_WORD_RE = re.compile(r"\b(terraform|tofu|terragrunt)(\.exe)?\b")
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +130,9 @@ APPLY_BINARIES = ("terraform", "tofu")
 class ScanError(Exception):
     """The scan could not produce a trustworthy answer.
 
-    Raised for a missing/timed-out/degraded scan. It ALWAYS results in a
-    fail-open allow -- we never deny a deploy on the strength of a scan that
-    did not actually run.
+    Raised for a missing/timed-out/degraded scan. It ALWAYS resolves to
+    ``ask`` -- we never deny a deploy on the strength of a scan that did not
+    actually run, and we never pre-approve one either.
     """
 
 
@@ -118,22 +145,44 @@ def _split_statements(command: str) -> List[str]:
     """Split a shell command into individual statements.
 
     Good enough for gate detection: break on ``&&``, ``||``, ``;``, ``|`` and
-    newlines. We do NOT need a real shell grammar -- we only need to avoid
-    treating ``cd foo && terraform apply`` as one opaque blob, and to avoid a
-    later statement's ``apply`` bleeding into an earlier ``echo``.
+    newlines (a backslash-newline continuation is joined first). We do NOT need
+    a real shell grammar -- we only need to avoid treating ``cd foo &&
+    terraform apply`` as one opaque blob, and to avoid a later statement's
+    ``apply`` bleeding into an earlier ``echo``.
     """
+    command = command.replace("\\\n", " ").replace("\\\r\n", " ")
     out: List[str] = []
     buf: List[str] = []
+    quote: Optional[str] = None  # inside '...' or "..." -- separators are literal
     i = 0
     n = len(command)
     while i < n:
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i : i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(command[i : i + 2])
+            i += 2
+            continue
         two = command[i : i + 2]
         if two in ("&&", "||"):
             out.append("".join(buf))
             buf = []
             i += 2
             continue
-        ch = command[i]
         if ch in (";", "|", "\n"):
             out.append("".join(buf))
             buf = []
@@ -153,73 +202,155 @@ def _binary_basename(token: str) -> str:
     return base
 
 
+def _join_dir(base: Optional[str], target: str) -> str:
+    if os.path.isabs(target) or base is None:
+        return target
+    return os.path.normpath(os.path.join(base, target))
+
+
+def _parse_statement(tokens: List[str], cd: Optional[str]) -> Optional[Dict[str, Any]]:
+    """One statement's tokens -> apply metadata, or None if it is not an apply.
+
+    Returns ``{"chdir": <str|None>, "cd": <str|None>}`` on a match, or
+    ``{"unparseable": reason}`` when the statement is a shell wrapper we
+    cannot see into.
+    """
+    idx = 0
+    # leading VAR=value env assignments and command wrappers
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if "=" in tok and not tok.startswith("-"):
+            idx += 1
+            continue
+        if _binary_basename(tok) in _WRAPPER_WORDS:
+            idx += 1
+            # skip the wrapper's own short options (`env -i`, `nice -n 5`)
+            while idx < len(tokens) and tokens[idx].startswith("-"):
+                idx += 1
+            continue
+        break
+    if idx >= len(tokens):
+        return None
+
+    word = _binary_basename(tokens[idx])
+
+    # `sh -c '<command>'` -- the real command is the string argument.
+    if word in _SHELLS:
+        if "-c" in tokens[idx + 1 :]:
+            script_idx = tokens.index("-c", idx + 1) + 1
+            if script_idx < len(tokens):
+                inner = parse_apply(tokens[script_idx])
+                if inner is None:
+                    return None
+                if "unparseable" in inner:
+                    return inner
+                inner_cd = inner.get("cd")
+                inner["cd"] = _join_dir(cd, inner_cd) if inner_cd else cd
+                return inner
+            return {"unparseable": "shell -c with no script argument"}
+        return None
+
+    if word not in APPLY_BINARIES:
+        return None
+
+    # Walk the remaining tokens: global options (incl. -chdir=DIR) come
+    # before the subcommand. The first non-option token is the subcommand.
+    chdir: Optional[str] = None
+    j = idx + 1
+    subcommand: Optional[str] = None
+    while j < len(tokens):
+        tok = tokens[j]
+        if tok.startswith("-chdir="):
+            chdir = tok.split("=", 1)[1]
+            j += 1
+            continue
+        if tok == "-chdir" and j + 1 < len(tokens):
+            chdir = tokens[j + 1]
+            j += 2
+            continue
+        if tok.startswith("--terragrunt-working-dir="):
+            chdir = tok.split("=", 1)[1]
+            j += 1
+            continue
+        if tok in ("--terragrunt-working-dir", "--working-dir") and j + 1 < len(tokens):
+            chdir = tokens[j + 1]
+            j += 2
+            continue
+        if word == "terragrunt" and tok in _TERRAGRUNT_PASS:
+            j += 1
+            continue
+        if tok.startswith("-"):
+            j += 1
+            continue
+        subcommand = tok
+        break
+    if subcommand == "apply":
+        return {"chdir": chdir, "cd": cd}
+    return None
+
+
 def parse_apply(command: str) -> Optional[Dict[str, Any]]:
     """Return apply metadata if ``command`` runs ``terraform apply``, else None.
 
     Handles: global options before the subcommand (``terraform -chdir=x
     apply``), option-laden applies (``terraform apply -auto-approve``), chained
-    statements (``cd d && terraform apply``), and absolute/`.exe` binary paths.
+    statements with a directory change (``cd d && terraform apply`` -> ``cd``
+    is reported so the scan looks at ``d``), wrappers (``env``, ``time``,
+    ``sudo``, ``sh -c '...'``), OpenTofu, terragrunt, and absolute/`.exe`
+    binary paths.
 
     Deliberately does NOT match ``terraform plan``/``validate``/``init``/``fmt``,
     nor ``echo terraform apply`` (the first token there is ``echo``), nor a
     ``terraform`` substring inside an unrelated word.
 
-    Returns ``{"chdir": <str|None>}`` -- ``chdir`` is the value of a
-    ``-chdir=DIR`` global flag if present, so the caller can scan the right
-    directory.
+    Returns ``{"chdir": <str|None>, "cd": <str|None>}``, or
+    ``{"unparseable": <reason>}`` when the command mentions an apply but uses
+    shell constructs this parser cannot evaluate (``$(...)``, backticks,
+    ``$VAR``, ``eval``, unbalanced quotes). The caller turns "unparseable"
+    into ``ask`` -- it never passes through.
     """
+    cd: Optional[str] = None
     for statement in _split_statements(command):
         try:
             tokens = shlex.split(statement)
-        except ValueError:
-            # Unbalanced quotes etc. -- can't reason about it; skip this
-            # statement rather than guess.
+        except ValueError as exc:
+            if _APPLY_WORD_RE.search(statement) and _BINARY_WORD_RE.search(statement):
+                return {"unparseable": "could not tokenize the command (%s)" % exc}
             continue
         if not tokens:
             continue
-        # Find the terraform/tofu invocation. It must be the command word of
-        # the statement (index 0), possibly with an env-assignment prefix like
-        # `TF_LOG=debug terraform ...`.
-        idx = 0
-        while idx < len(tokens) and "=" in tokens[idx] and not tokens[idx].startswith("-"):
-            # leading VAR=value env assignments
-            idx += 1
-        if idx >= len(tokens):
+        if tokens[0] in ("cd", "pushd"):
+            if len(tokens) < 2 or tokens[1] in ("-", "~") or tokens[1].startswith("$"):
+                # `cd` home / `cd -` / `cd $DIR`: the target dir is not knowable here.
+                cd = None
+                if _APPLY_WORD_RE.search(command) and _BINARY_WORD_RE.search(command):
+                    return {"unparseable": "directory change to an unresolvable target"}
+                continue
+            cd = _join_dir(cd, tokens[1])
             continue
-        if _binary_basename(tokens[idx]) not in APPLY_BINARIES:
-            continue
-        # Walk the remaining tokens: global options (incl. -chdir=DIR) come
-        # before the subcommand. The first non-option token is the subcommand.
-        chdir: Optional[str] = None
-        j = idx + 1
-        subcommand: Optional[str] = None
-        while j < len(tokens):
-            tok = tokens[j]
-            if tok.startswith("-chdir="):
-                chdir = tok.split("=", 1)[1]
-                j += 1
-                continue
-            if tok == "-chdir" and j + 1 < len(tokens):
-                chdir = tokens[j + 1]
-                j += 2
-                continue
-            if tok.startswith("-"):
-                j += 1
-                continue
-            subcommand = tok
-            break
-        if subcommand == "apply":
-            return {"chdir": chdir}
+        meta = _parse_statement(tokens, cd)
+        if meta is not None:
+            return meta
+
+    # Nothing parsed cleanly. If the command still looks like an apply built
+    # from a substitution or variable, say so rather than wave it through.
+    if (
+        _APPLY_WORD_RE.search(command)
+        and _BINARY_WORD_RE.search(command)
+        and _DYNAMIC_RE.search(command)
+    ):
+        return {"unparseable": "apply built from a shell substitution or variable"}
     return None
 
 
-def resolve_target_dir(cwd: str, chdir: Optional[str]) -> str:
-    """The directory to scan: ``-chdir`` resolved against cwd, else cwd."""
+def resolve_target_dir(cwd: str, chdir: Optional[str], cd: Optional[str] = None) -> str:
+    """The directory to scan: ``cd`` then ``-chdir`` resolved against cwd, else cwd."""
+    base = cwd
+    if cd:
+        base = _join_dir(cwd, cd)
     if chdir:
-        if os.path.isabs(chdir):
-            return chdir
-        return os.path.normpath(os.path.join(cwd, chdir))
-    return cwd
+        return _join_dir(base, chdir)
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -265,11 +396,26 @@ class GateConfig:
         self.mode = mode
         self.floor = floor
         self.timeout = timeout
-        self.source = source  # human-readable provenance, for the fail/allow message
+        self.source = source  # human-readable provenance, for the decision message
 
     @property
     def enabled(self) -> bool:
         return self.mode in ("warn", "ask", "block")
+
+
+def _config_candidates(cwd: str, env: Dict[str, str]) -> List[str]:
+    """Where the enable file may live: the project root Claude Code exports
+    (``CLAUDE_PROJECT_DIR``) first, then the session cwd. A ``cd`` into a
+    subdirectory must not silently turn the gate off."""
+    out: List[str] = []
+    project = (env.get(ENV_PROJECT_DIR) or "").strip()
+    if project:
+        out.append(os.path.join(project, CONFIG_RELPATH))
+    if cwd:
+        candidate = os.path.join(cwd, CONFIG_RELPATH)
+        if candidate not in out:
+            out.append(candidate)
+    return out
 
 
 def resolve_config(cwd: str, env: Optional[Dict[str, str]] = None) -> GateConfig:
@@ -281,9 +427,12 @@ def resolve_config(cwd: str, env: Optional[Dict[str, str]] = None) -> GateConfig
     env = os.environ if env is None else env
 
     file_fields: Dict[str, str] = {}
-    config_path = os.path.join(cwd, CONFIG_RELPATH)
-    if os.path.isfile(config_path):
-        file_fields = _read_frontmatter(config_path)
+    config_path = ""
+    for candidate in _config_candidates(cwd, env):
+        if os.path.isfile(candidate):
+            file_fields = _read_frontmatter(candidate)
+            config_path = candidate
+            break
 
     # Mode: env wins, then file, then default off.
     mode = (env.get(ENV_MODE) or file_fields.get("apply_gate") or DEFAULT_MODE).strip().lower()
@@ -307,7 +456,7 @@ def resolve_config(cwd: str, env: Optional[Dict[str, str]] = None) -> GateConfig
     if env.get(ENV_MODE):
         source = "env (%s)" % ENV_MODE
     elif file_fields.get("apply_gate"):
-        source = CONFIG_RELPATH
+        source = config_path or CONFIG_RELPATH
     else:
         source = "default"
 
@@ -330,7 +479,7 @@ def default_scan(target_dir: str, floor: str, timeout: int) -> List[Dict[str, An
 
     Raises ``ScanError`` on anything that means "we don't have a trustworthy
     answer" -- checkov missing (degraded), timeout, bad output, no such dir.
-    The caller turns every ScanError into a fail-open allow.
+    The caller turns every ScanError into ``ask``.
 
     This is the DEFAULT scan. Tests inject their own ``scan_fn`` instead; the
     real one is what makes the hook useful in the wild.
@@ -362,20 +511,20 @@ def default_scan(target_dir: str, floor: str, timeout: int) -> List[Dict[str, An
 
     # A degraded scan (e.g. checkov not installed) did NOT run the rule engine.
     # We cannot assert the presence or absence of criticals, so we must not
-    # block on it. Fail open, loudly.
+    # block on it -- and must not clear it either.
     if payload.get("degraded"):
         raise ScanError(
             "scan was degraded (%s); the rule engine did not run"
             % (payload.get("degradationReason") or "unknown reason")
         )
 
-    # Lazy import so a broken scanner package fails OPEN (ScanError) instead of
-    # crashing this hook at load time.
+    # Lazy import so a broken scanner package resolves to `ask` (ScanError)
+    # instead of crashing this hook at load time.
     try:
         from findings import SeverityMap  # noqa: WPS433 (intentional local import)
 
         severity_map = SeverityMap.load()
-    except Exception as exc:  # noqa: BLE001 - any failure here is a fail-open
+    except Exception as exc:  # noqa: BLE001 - any failure here is an `ask`
         raise ScanError("could not load severity map: %s" % exc)
 
     blocking: List[Dict[str, Any]] = []
@@ -410,6 +559,8 @@ def _passthrough() -> Dict[str, Any]:
 
 
 def _decision(decision: str, reason: str, *, system_message: Optional[str] = None) -> Dict[str, Any]:
+    # The whole contract of this hook: `ask` or `deny`. Never `allow`.
+    assert decision in ("ask", "deny"), decision
     out: Dict[str, Any] = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -458,8 +609,8 @@ def decide(
     """Decide what to do with one PreToolUse event. Pure and injectable.
 
     ``scan_fn(target_dir, floor, timeout)`` returns the list of blocking
-    findings (or raises to signal a scan error -> fail open). Tests pass a
-    stub; production uses ``default_scan``.
+    findings (or raises to signal a scan error -> ``ask``). Tests pass a stub;
+    production uses ``default_scan``.
     """
     cwd = hook_input.get("cwd") or os.getcwd()
 
@@ -477,45 +628,53 @@ def decide(
     apply_meta = parse_apply(command)
     if apply_meta is None:
         return _passthrough()
+    if apply_meta.get("unparseable"):
+        return _decision(
+            "ask",
+            "iac-security-scan apply-gate: this looks like a terraform apply, but "
+            "the command could not be parsed (%s), so the target directory was not "
+            "scanned. Confirm you want to apply unscanned. %s"
+            % (apply_meta["unparseable"], _BYPASS),
+            system_message=(
+                "iac-security-scan apply-gate could not parse the apply command "
+                "(%s). Treat this as an unscanned deploy." % apply_meta["unparseable"]
+            ),
+        )
 
-    target_dir = resolve_target_dir(cwd, apply_meta.get("chdir"))
+    target_dir = resolve_target_dir(cwd, apply_meta.get("chdir"), apply_meta.get("cd"))
 
-    # STEP 3 -- scan, bounded. ANY failure here fails OPEN. We never deny a
-    # deploy because our own scan broke.
+    # STEP 3 -- scan, bounded. ANY failure here is `ask`. We never deny a deploy
+    # because our own scan broke, and we never clear one either.
     try:
         blocking = scan_fn(target_dir, config.floor, config.timeout)
     except ScanError as exc:
         return _decision(
-            "allow",
-            "iac-security-scan apply-gate FAILED OPEN: %s. Allowing the apply "
-            "rather than blocking on a scan that could not run. %s"
-            % (exc, _BYPASS),
+            "ask",
+            "iac-security-scan apply-gate could not scan %s: %s. The apply is NOT "
+            "cleared -- confirm you want to apply unscanned. %s"
+            % (target_dir, exc, _BYPASS),
             system_message=(
                 "iac-security-scan apply-gate could not complete a scan of %s "
-                "(%s). Per its fail-open policy the apply was ALLOWED, not "
-                "blocked. Treat this as an unscanned deploy." % (target_dir, exc)
+                "(%s). Treat this as an unscanned deploy." % (target_dir, exc)
             ),
         )
-    except Exception as exc:  # noqa: BLE001 - unknown failure must still fail open
+    except Exception as exc:  # noqa: BLE001 - unknown failure must still be `ask`
         return _decision(
-            "allow",
-            "iac-security-scan apply-gate FAILED OPEN (unexpected error: %s). "
-            "Allowing the apply. %s" % (exc, _BYPASS),
+            "ask",
+            "iac-security-scan apply-gate hit an unexpected error (%s). The apply "
+            "is NOT cleared -- confirm you want to apply unscanned. %s" % (exc, _BYPASS),
         )
 
-    # STEP 4 -- clean at/above the floor: proceed silently.
+    # STEP 4 -- clean at/above the floor: the NORMAL permission prompt applies.
+    # This is deliberately `ask`, not `allow`: the gate adds a check, it never
+    # removes the one the user already had.
     if not blocking:
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": (
-                    "iac-security-scan apply-gate: no unfixed findings at or above "
-                    "'%s' in %s." % (config.floor, target_dir)
-                ),
-            },
-            "suppressOutput": True,
-        }
+        return _decision(
+            "ask",
+            "iac-security-scan apply-gate: no unfixed findings at or above '%s' in "
+            "%s. The gate does not pre-approve applies; confirm as usual."
+            % (config.floor, target_dir),
+        )
 
     # STEP 5 -- there are unfixed findings at/above the floor. Act per mode.
     listing = _format_findings(blocking)
@@ -526,8 +685,8 @@ def decide(
 
     if config.mode == "warn":
         return _decision(
-            "allow",
-            headline + "\n\nMode is 'warn' -- the apply is NOT blocked. " + _BYPASS,
+            "ask",
+            headline + "\n\nMode is 'warn' -- confirm to apply with these findings. " + _BYPASS,
             system_message="WARNING -- deploying with unfixed security findings:\n" + headline,
         )
     if config.mode == "ask":
@@ -551,9 +710,10 @@ def decide(
 def main(argv: Optional[List[str]] = None) -> int:
     """Read a PreToolUse event on stdin, write a decision on stdout.
 
-    The outermost guarantee: this function NEVER exits non-zero and NEVER emits
-    a deny by accident. Any unexpected error results in a passthrough allow, so
-    a bug in the gate can't wedge someone's terraform apply.
+    The outermost guarantee: this function NEVER exits non-zero, NEVER emits a
+    deny by accident, and NEVER emits an allow. Any unexpected error resolves
+    to `ask`, so a bug in the gate can neither wedge nor pre-approve someone's
+    terraform apply.
     """
     try:
         raw = sys.stdin.read()
@@ -566,10 +726,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not isinstance(hook_input, dict):
             hook_input = {}
         result = decide(hook_input)
-    except Exception as exc:  # noqa: BLE001 - fail open on anything
+    except Exception as exc:  # noqa: BLE001 - never crash, never allow
         result = _decision(
-            "allow",
-            "iac-security-scan apply-gate FAILED OPEN (%s). Allowing the apply." % exc,
+            "ask",
+            "iac-security-scan apply-gate failed (%s). The apply is NOT cleared -- "
+            "confirm as usual." % exc,
         )
 
     json.dump(result, sys.stdout)

@@ -16,7 +16,8 @@ apply_gate: block
 apply_gate_severity: critical
 
 # Hard cap on scan time (seconds). If the scan takes longer it TIMES OUT and the
-# apply is ALLOWED (fail-open), never blocked.
+# gate answers `ask` (your normal permission prompt), never `deny` and never
+# `allow`.
 apply_gate_timeout: 120
 ---
 
@@ -24,7 +25,9 @@ apply_gate_timeout: 120
 
 This project has the opt-in `terraform apply` security gate configured above.
 
-Remember: the gate **fails open**. If Checkov is missing, the scan errors, or it
-times out, your `terraform apply` proceeds -- the gate warns you loudly but will
-never wedge a deploy because the scanner broke. To turn it off, set
-`apply_gate: off` above (or export `IAC_SECURITY_SCAN_APPLY_GATE=off`).
+Remember: the gate **never auto-approves and never wedges a deploy**. If Checkov
+is missing, the scan errors, or it times out, you get your normal permission
+prompt with the gate's verdict attached -- the gate cannot pre-approve an apply,
+and it only denies one in `block` mode when a scan ran and found something. To
+turn it off, set `apply_gate: off` above (or export
+`IAC_SECURITY_SCAN_APPLY_GATE=off`).
