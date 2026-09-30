@@ -1,4 +1,4 @@
-"""The adversarial suite (SPEC §11, IMPLEMENTATION_PLAN WS-4 acceptance 3).
+"""The adversarial suite (SPEC §11, workstream WS-4 acceptance 3).
 
 IaC files are untrusted input. A comment in someone's `main.tf` reading
 
@@ -27,6 +27,7 @@ on a copy in tmp_path.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -368,7 +369,8 @@ def test_the_agent_definition_carries_the_same_rules():
     no-veto rule, the model that runs deep enrichment loses it too."""
     agent = os.path.join(REPO_ROOT, "agents", "iac-security-analyst.md")
     text = open(agent, encoding="utf-8").read()
-    assert "model: opus" in text
+    # A floating alias, never a pinned model id (opus/fable/sonnet/haiku).
+    assert re.search(r"^model: (opus|fable|sonnet|haiku)$", text, re.MULTILINE)
     assert "UNTRUSTED INPUT" in text
     assert "You cannot delete a finding" in text
     assert "INJECTION_ATTEMPT" in text

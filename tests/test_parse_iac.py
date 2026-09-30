@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PARSER_PATH = REPO_ROOT / "skills" / "iac-security-scan" / "scripts" / "parse_iac.py"
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 
-# Measured against the corpus during pre-flight (IMPLEMENTATION_PLAN §1.1).
+# Measured against the fixture corpus during pre-flight.
 EXPECTED_RESOURCE_COUNTS = {
     "tf-01-three-tier-webapp": 63,
     "tf-02-serverless-api": 51,

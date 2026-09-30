@@ -1,0 +1,17 @@
+# Runtime dependencies for the iac-security-scan scripts (Python >= 3.9).
+#
+# Without `tfparse` a Terraform scan is DEGRADED (no line numbers, no SARIF, no
+# patches); without `cfn-lint` the same holds for CloudFormation; without
+# `ruamel.yaml` for Kubernetes and Compose. The scan still runs and says so.
+pyyaml>=6.0
+tfparse>=0.6
+cfn-lint>=1.0
+ruamel.yaml>=0.18
+
+# The deterministic rule layer. Pinned: the rule set moves between releases and
+# the checked-in severity seeds, answer keys and corpus counts are graded
+# against exactly this version (3.3.x adds CKV_AWS_394, which has no seed yet).
+checkov==3.2.500
+
+# Optional, only for the experimental `--live` read-only verification:
+#   pip install boto3
